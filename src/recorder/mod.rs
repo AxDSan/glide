@@ -2,6 +2,9 @@
 //! system audio and microphone stems, the camera as its own file, and
 //! input events for re-rendering the cursor, zooms and key badges.
 
+#[cfg(target_os = "linux")]
+#[path = "cursor_kind_linux.rs"]
+mod cursor_kind;
 #[cfg_attr(target_os = "linux", path = "input_linux.rs")]
 pub mod input;
 

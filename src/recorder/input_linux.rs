@@ -13,6 +13,7 @@ use std::time::Duration;
 use anyhow::{Context, Result, bail};
 use evdev::{Device, EventType, InputEvent, KeyCode};
 
+use super::cursor_kind::Classifier;
 use crate::capture::screen::{CursorBitmap, CursorState};
 use crate::capture::types::clock_secs;
 use crate::engine::geom::Rect;
@@ -460,6 +461,8 @@ fn poll(sh: Arc<Shared>, dir: PathBuf, cursor: impl Fn() -> Option<CursorState>,
     let mut moved: Option<(f64, f64)> = None;
     let mut seen_bitmap: Option<u64> = None;
     let mut last_bounds: Option<Rect> = None;
+    // Loaded on the first cursor image, at that image's size.
+    let mut classifier: Option<Option<Classifier>> = None;
     while !sh.stop.load(Relaxed) {
         if let Some(c) = cursor() {
             if c.visible {
@@ -487,7 +490,8 @@ fn poll(sh: Arc<Shared>, dir: PathBuf, cursor: impl Fn() -> Option<CursorState>,
             if let Some(b) = c.bitmap {
                 if seen_bitmap != Some(b.id) {
                     seen_bitmap = Some(b.id);
-                    add_cursor(&sh, &dir, &b);
+                    let names = classifier.get_or_insert_with(|| Classifier::load(b.w as u32));
+                    add_cursor(&sh, &dir, &b, names.as_ref());
                 }
             }
         }
@@ -505,8 +509,9 @@ fn poll(sh: Arc<Shared>, dir: PathBuf, cursor: impl Fn() -> Option<CursorState>,
     }
 }
 
-/// Save a new cursor bitmap as `cursor-{id}.png` and make it the current cursor.
-fn add_cursor(sh: &Shared, dir: &Path, b: &CursorBitmap) {
+/// Save a new cursor bitmap as `cursor-{id}.png`, name it from the cursor theme
+/// when it matches one, and make it the current cursor.
+fn add_cursor(sh: &Shared, dir: &Path, b: &CursorBitmap, names: Option<&Classifier>) {
     let (w, h) = (b.w as u32, b.h as u32);
     if w == 0 || h == 0 {
         return;
@@ -517,7 +522,8 @@ fn add_cursor(sh: &Shared, dir: &Path, b: &CursorBitmap) {
     let size = (w as f64, h as f64);
     let hotspot = (b.hot.0 as f64 / size.0, b.hot.1 as f64 / size.1);
     let mut log = lock(&sh.log);
-    log.cursors.push(CursorImage { id, file: saved.then_some(file), hotspot, size, system: None });
+    let system = names.and_then(|n| n.classify(b.w, b.h, &b.bgra, b.hot)).map(str::to_string);
+    log.cursors.push(CursorImage { id, file: saved.then_some(file), hotspot, size, system });
     sh.cursor.store(id, Relaxed);
 }
 
