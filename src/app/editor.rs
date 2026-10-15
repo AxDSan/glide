@@ -948,6 +948,11 @@ impl Editor {
             .show(ctx, |ui| {
                 let mut s = self.project.export;
                 let running = self.export.running.is_some();
+                widgets::low_memory_note(
+                    ui,
+                    "Exporting",
+                    &["Close other apps and browser tabs", "Export at a lower resolution or 30 fps", "Use H.264 instead of ProRes"],
+                );
                 ui.add_enabled_ui(!running, |ui| {
                     widgets::row(ui, "Format", |ui| {
                         let before = s.format;

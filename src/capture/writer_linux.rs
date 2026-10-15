@@ -18,7 +18,7 @@ use anyhow::{anyhow, bail, Context, Result};
 use super::compose::{Compositor, Scene};
 pub use super::types::{AudioLayout, Codec, Stats, VideoSpec};
 use super::types::{clock_secs, AudioKind, Bgra, Pauses, RATE};
-use crate::media::ffmpeg::{encoder_args, video_filter, VideoKind};
+use crate::media::ffmpeg::{encoder_args, filter_threads, video_encoder, video_filter, VideoKind};
 
 /// Frames kept per camera or screen queue.
 const QUEUE: usize = 4;
@@ -144,6 +144,9 @@ impl Out {
             "-loglevel".into(),
             "error".into(),
             "-nostats".into(),
+        ];
+        args.extend(filter_threads());
+        args.extend([
             "-f".into(),
             "rawvideo".into(),
             "-pix_fmt".into(),
@@ -154,10 +157,18 @@ impl Out {
             fps,
             "-i".into(),
             "pipe:0".into(),
-        ];
+        ]);
         args.extend(["-map", "0:v:0"].map(String::from));
-        args.extend(["-vf", video_filter(kind)].map(String::from));
-        args.extend(encoder_args(kind, v.quality, v.bitrate, v.fps));
+        // H.264/HEVC: no BT.709 filter. NVENC takes the BGRA as is and converts
+        // on the GPU; a software encoder gets ffmpeg's default conversion. That is
+        // about half the CPU, and it round-trips more faithfully through Glide's
+        // reader, which decodes with the same default matrix.
+        match kind {
+            VideoKind::H264 | VideoKind::Hevc if video_encoder(kind).ends_with("_nvenc") => {}
+            VideoKind::H264 | VideoKind::Hevc => args.extend(["-pix_fmt", "yuv420p"].map(String::from)),
+            _ => args.extend(["-vf", video_filter(kind)].map(String::from)),
+        }
+        args.extend(encoder_args(kind, v.quality, v.bitrate, v.fps, true));
         args.extend(
             ["-movflags", "+frag_keyframe+empty_moov+default_base_moof", "-fps_mode", "cfr"]
                 .map(String::from),

@@ -67,18 +67,15 @@ impl MovieWriter {
             "-loglevel",
             "error",
             "-y",
-            "-f",
-            "rawvideo",
-            "-pix_fmt",
-            "bgra",
-            "-s",
         ]);
+        args.extend(ffmpeg::filter_threads());
+        args.extend(strings(&["-f", "rawvideo", "-pix_fmt", "bgra", "-s"]));
         args.push(size);
         args.push("-r".into());
         args.push(fps);
         args.extend(strings(&["-i", "pipe:0", "-vf"]));
         args.push(ffmpeg::video_filter(kind).to_string());
-        args.extend(ffmpeg::encoder_args(kind, s.quality, s.bitrate, s.fps));
+        args.extend(ffmpeg::encoder_args(kind, s.quality, s.bitrate, s.fps, false));
         args.extend(strings(&[
             "-colorspace",
             "bt709",

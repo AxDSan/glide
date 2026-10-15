@@ -722,10 +722,25 @@ fn on_frame(stream: &Stream, st: &mut Frames) -> Result<()> {
         bail!("screen buffer too small for {fw}x{fh} frame");
     }
 
-    // Crop and nearest-neighbour scale to the output size, converting to BGRA.
     let (ow, oh) = (st.out_w, st.out_h);
-    let xmap: Vec<usize> = (0..ow).map(|ox| rect.x + ox * rect.w / ow).collect();
     let mut px = vec![0u8; ow * oh * 4];
+    // Common case (whole display or window at its own size, BGR order): copy rows,
+    // which is several times cheaper than the per-pixel path at 60 fps.
+    if !swap && (rect.w, rect.h) == (ow, oh) {
+        for (oy, dst) in px.chunks_exact_mut(ow * 4).enumerate() {
+            let s = off + (rect.y + oy) * row + rect.x * 4;
+            dst.copy_from_slice(&data[s..s + ow * 4]);
+        }
+        if !alpha {
+            px.chunks_exact_mut(4).for_each(|p| p[3] = 255);
+        }
+        st.last_push = now;
+        st.shared.push_screen(now, Bgra { w: ow, h: oh, px });
+        return Ok(());
+    }
+
+    // Crop and nearest-neighbour scale to the output size, converting to BGRA.
+    let xmap: Vec<usize> = (0..ow).map(|ox| rect.x + ox * rect.w / ow).collect();
     for oy in 0..oh {
         let srow = off + (rect.y + oy * rect.h / oh) * row;
         let drow = oy * ow * 4;

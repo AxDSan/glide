@@ -581,6 +581,17 @@ pub fn record_settings(ui: &mut Ui, s: &mut Settings, dev: &mut Devices, permiss
             });
     }
 
+    widgets::low_memory_note(
+        ui,
+        "Recording",
+        &[
+            "Close other apps and browser tabs",
+            "Record at 30 fps (Options, below)",
+            "Record a window or an area instead of the whole display",
+            "Pick Screen instead of Screen + Cam",
+        ],
+    );
+
     heading(ui, "SCENE");
     choice(ui, &mut s.camera, &[(false, "Screen"), (true, "Screen + Cam")]);
 

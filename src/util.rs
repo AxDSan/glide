@@ -183,3 +183,27 @@ fn xdg_user_dir(name: &str) -> Option<PathBuf> {
     };
     (!value.is_empty()).then_some(path)
 }
+
+/// Memory the system can still hand out without swapping (`MemAvailable`),
+/// in bytes. Read at most every 2 s; None where it can't be read (macOS).
+/// `GLIDE_MEMORY_AVAILABLE_MB` overrides it, to try the low-memory warnings.
+pub fn available_memory() -> Option<u64> {
+    use std::sync::Mutex;
+    use std::time::{Duration, Instant};
+    static CACHE: Mutex<Option<(Instant, Option<u64>)>> = Mutex::new(None);
+    if let Some(mb) = std::env::var("GLIDE_MEMORY_AVAILABLE_MB").ok().and_then(|v| v.parse::<u64>().ok()) {
+        return Some(mb << 20);
+    }
+    let mut cache = CACHE.lock().unwrap_or_else(|e| e.into_inner());
+    if let Some((at, v)) = *cache
+        && at.elapsed() < Duration::from_secs(2)
+    {
+        return v;
+    }
+    let v = std::fs::read_to_string("/proc/meminfo").ok().and_then(|s| {
+        let kb = s.lines().find_map(|l| l.strip_prefix("MemAvailable:"))?;
+        kb.trim().trim_end_matches("kB").trim().parse::<u64>().ok().map(|kb| kb * 1024)
+    });
+    *cache = Some((Instant::now(), v));
+    v
+}

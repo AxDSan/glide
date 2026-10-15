@@ -149,8 +149,11 @@ fn encoder_opens(name: &str) -> bool {
         .is_ok_and(|s| s.success())
 }
 
+/// `GLIDE_SOFTWARE_ENCODE=1` skips the hardware encoder (to test or work
+/// around a broken driver).
 fn pick(hardware: &'static str, software: &'static str) -> &'static str {
-    if encoder_opens(hardware) { hardware } else { software }
+    let forced = std::env::var_os("GLIDE_SOFTWARE_ENCODE").is_some_and(|v| v != "0");
+    if !forced && encoder_opens(hardware) { hardware } else { software }
 }
 
 /// ffmpeg video encoder name for a kind: NVENC when it opens, else software.
@@ -165,6 +168,14 @@ pub fn video_encoder(kind: VideoKind) -> &'static str {
     }
 }
 
+/// Global options that let the BGRA-to-YUV conversion run on several cores:
+/// about 20% less CPU than a single thread at 1080p60. Capped at 4 so a
+/// recording leaves cores for the rest of the system.
+pub fn filter_threads() -> [String; 2] {
+    let n = std::thread::available_parallelism().map_or(1, |n| n.get()).clamp(1, 4);
+    ["-filter_threads".into(), n.to_string()]
+}
+
 /// Filter chain from BGRA input to the encoder's pixel format, converting
 /// with the BT.709 matrix used by the macOS writer.
 pub fn video_filter(kind: VideoKind) -> &'static str {
@@ -177,8 +188,16 @@ pub fn video_filter(kind: VideoKind) -> &'static str {
 /// Encoder arguments: `-c:v`, GOP (2 s), preset, and rate control.
 /// `quality` (0..1, higher is better) maps to CRF/CQ 28 (q 0.5) .. 18 (q 1);
 /// otherwise `bitrate` (bits/s) is used. ProRes ignores both (fixed quality).
-pub fn encoder_args(kind: VideoKind, quality: Option<f64>, bitrate: u64, fps: u32) -> Vec<String> {
-    let enc = video_encoder(kind);
+/// `realtime` (recording) must keep up with the capture: without a hardware
+/// encoder it uses H.264 at the fastest preset, since libx265 or libx264 at
+/// `medium` cannot encode 1080p60 live on a modest CPU.
+pub fn encoder_args(kind: VideoKind, quality: Option<f64>, bitrate: u64, fps: u32, realtime: bool) -> Vec<String> {
+    let mut enc = video_encoder(kind);
+    let mut kind = kind;
+    let software = !enc.ends_with("_nvenc");
+    if realtime && software && matches!(kind, VideoKind::H264 | VideoKind::Hevc) {
+        (enc, kind) = ("libx264", VideoKind::H264);
+    }
     let mut a = Vec::new();
     pair(&mut a, "-c:v", enc);
     pair(&mut a, "-g", fps.max(1) * 2);
@@ -187,7 +206,7 @@ pub fn encoder_args(kind: VideoKind, quality: Option<f64>, bitrate: u64, fps: u3
         VideoKind::Prores4444 => pair(&mut a, "-profile:v", "4444"),
         VideoKind::H264 | VideoKind::Hevc => {
             let hw = enc.ends_with("_nvenc");
-            pair(&mut a, "-preset", if hw { "p5" } else { "medium" });
+            pair(&mut a, "-preset", if hw { "p5" } else if realtime { "ultrafast" } else { "medium" });
             if kind == VideoKind::Hevc {
                 // Apple players only accept HEVC tagged hvc1.
                 pair(&mut a, "-tag:v", "hvc1");

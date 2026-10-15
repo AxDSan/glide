@@ -141,6 +141,28 @@ pub fn color_edit(ui: &mut Ui, c: &mut crate::project::model::Color) -> bool {
     changed
 }
 
+/// Below this much available memory, recording and export warn.
+const LOW_MEMORY: u64 = 1536 << 20;
+
+/// A warning card when the system is low on memory, with `tips` (one per line)
+/// on what to change. Shows nothing otherwise.
+pub fn low_memory_note(ui: &mut Ui, what: &str, tips: &[&str]) {
+    let Some(free) = crate::util::available_memory().filter(|b| *b < LOW_MEMORY) else { return };
+    ui.add_space(8.0);
+    egui::Frame::new()
+        .fill(Color32::from_rgba_unmultiplied(255, 159, 10, 30))
+        .corner_radius(CornerRadius::same(8))
+        .inner_margin(egui::Margin::same(10))
+        .show(ui, |ui| {
+            let gb = free as f64 / (1u64 << 30) as f64;
+            ui.label(RichText::new(format!("Low memory: {gb:.1} GB free")).strong().size(12.0));
+            ui.label(RichText::new(format!("{what} may stutter or fail. To help:")).size(12.0));
+            for tip in tips {
+                ui.label(RichText::new(format!("•  {tip}")).size(12.0).color(pal(ui).secondary));
+            }
+        });
+}
+
 /// Small secondary caption text.
 pub fn caption(ui: &mut Ui, text: &str) {
     ui.label(RichText::new(text).size(theme::SECONDARY).color(pal(ui).secondary));
