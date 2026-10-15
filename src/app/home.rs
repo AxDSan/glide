@@ -534,11 +534,12 @@ fn heading(ui: &mut Ui, title: &str) {
     ui.add_space(4.0);
 }
 
-/// Combo box filling the sidebar's width.
+/// Combo box filling the sidebar's width. Long labels (window titles, device
+/// names) are truncated so they can't widen the sidebar.
 fn combo<T: Clone + PartialEq>(ui: &mut Ui, id: &str, value: &mut T, options: &[(T, String)], enabled: bool) {
     let current = options.iter().find(|(v, _)| v == value).map(|(_, l)| l.clone()).unwrap_or_default();
     ui.add_enabled_ui(enabled, |ui| {
-        egui::ComboBox::from_id_salt(id).width(ui.available_width()).selected_text(current).show_ui(ui, |ui| {
+        egui::ComboBox::from_id_salt(id).width(ui.available_width()).truncate().selected_text(current).show_ui(ui, |ui| {
             for (v, label) in options {
                 if ui.selectable_label(v == value, label).clicked() {
                     *value = v.clone();
@@ -596,12 +597,14 @@ pub fn record_settings(ui: &mut Ui, s: &mut Settings, dev: &mut Devices, permiss
             let chosen = s.window.and_then(|w| dev.windows.iter().find(|d| d.id == w)).cloned();
             let mut windows = vec![(None, "Choose a window".to_string())];
             windows.extend(dev.windows.iter().map(|d| (Some(d.id), d.label.clone())));
-            ui.horizontal(|ui| {
-                let w = ui.available_width() - 30.0;
-                ui.allocate_ui(vec2(w, 24.0), |ui| combo(ui, "window", &mut s.window, &windows, true));
+            // Right to left: the refresh button takes its width, the combo fills the rest.
+            // A fixed-height row, so the layout doesn't claim the sidebar's remaining height.
+            let row_h = ui.spacing().interact_size.y;
+            ui.allocate_ui_with_layout(vec2(ui.available_width(), row_h), Layout::right_to_left(Align::Center), |ui| {
                 if ui.button("↻").on_hover_text("Refresh windows").clicked() {
                     *dev = Devices::load();
                 }
+                combo(ui, "window", &mut s.window, &windows, true);
             });
             if let Some(w) = &chosen
                 && let Some((width, height)) = window_size_row(ui, s, w)

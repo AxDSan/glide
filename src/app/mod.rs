@@ -2085,6 +2085,11 @@ impl ApplicationHandler for App {
         if !self.scripted() {
             self.settings.save();
         }
+        // Close the windows while the display connection is still open: on
+        // Wayland, egui's clipboard worker destroys its objects when dropped,
+        // and doing that after the event loop is gone segfaults on quit.
+        self.overlays.clear();
+        self.main = None;
     }
 
     fn about_to_wait(&mut self, el: &ActiveEventLoop) {

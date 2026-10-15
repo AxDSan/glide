@@ -178,3 +178,30 @@ fn editor_and_home_render_every_panel() {
     }
     let _ = std::fs::remove_dir_all(&dir);
 }
+
+/// A long window title or device name must not widen the start view's
+/// sidebar past the window (it pushed the sidebar off-screen and the preview
+/// over it).
+#[test]
+fn start_view_fits_long_names() {
+    use glide::app::home::{SourceKind, WindowEntry};
+    let ctx = egui::Context::default();
+    glide::app::theme::apply(&ctx);
+    let long = "org.mozilla.firefox — AI Influencer | Higgsfield — Mozilla Firefox — a very long window title";
+    let mut s = Settings { source: SourceKind::Window, camera: true, window: Some(1), ..Settings::default() };
+    let mut devices = Devices::default();
+    devices.windows.push(WindowEntry { id: 1, label: long.into(), size: (1536.0, 824.0), display: (1536.0, 864.0) });
+    let mut thumbs = Thumbs::default();
+    let tex = egui::TextureId::Managed(0);
+    let live = home::LiveView { screen: Some((tex, egui::vec2(1536.0, 824.0))), camera: Some((tex, egui::vec2(1280.0, 720.0))), ..Default::default() };
+    let size = egui::vec2(1100.0, 840.0);
+    for i in 0..3 {
+        let input = egui::RawInput { screen_rect: Some(egui::Rect::from_min_size(egui::Pos2::ZERO, size)), time: Some(i as f64 * 0.016), ..Default::default() };
+        let mut out = ctx.run_ui(input, |ui| {
+            home::start_view(ui, &mut s, &mut devices, &[], &mut thumbs, None, &live);
+        });
+        out.textures_delta.clear();
+    }
+    let sidebar = egui::containers::panel::PanelState::load(&ctx, egui::Id::new("start-sidebar")).expect("sidebar shown");
+    assert!(sidebar.outer_rect.right() <= size.x + 0.5, "sidebar spans {:?} in a {} wide window", sidebar.outer_rect.x_range(), size.x);
+}
