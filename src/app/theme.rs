@@ -51,6 +51,28 @@ pub fn set_accent(c: Color32) {
     );
 }
 
+/// KDE's accent from `kdeglobals` `[General] AccentColor=r,g,b` (absent means the default).
+#[cfg(target_os = "linux")]
+fn kde_accent() -> Option<Color32> {
+    let dir = std::env::var_os("XDG_CONFIG_HOME")
+        .map(std::path::PathBuf::from)
+        .or_else(|| std::env::var_os("HOME").map(|h| std::path::PathBuf::from(h).join(".config")))?;
+    let text = std::fs::read_to_string(dir.join("kdeglobals")).ok()?;
+    let mut general = false;
+    for line in text.lines().map(str::trim) {
+        if line.starts_with('[') {
+            general = line == "[General]";
+        } else if general && let Some(v) = line.strip_prefix("AccentColor=") {
+            let rgb: Option<Vec<u8>> = v.split(',').map(|s| s.trim().parse().ok()).collect();
+            return match rgb.as_deref() {
+                Some(&[r, g, b]) => Some(Color32::from_rgb(r, g, b)),
+                _ => None,
+            };
+        }
+    }
+    None
+}
+
 /// The user's accent colour from System Settings › Appearance (falls back to system blue).
 pub fn system_accent() -> Color32 {
     #[cfg(target_os = "macos")]
@@ -73,6 +95,10 @@ pub fn system_accent() -> Color32 {
                 _ => MAC_BLUE,
             };
         }
+    }
+    #[cfg(target_os = "linux")]
+    if let Some(c) = kde_accent() {
+        return c;
     }
     MAC_BLUE
 }

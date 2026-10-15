@@ -12,10 +12,12 @@ pub struct Gpu {
 }
 
 impl Gpu {
-    /// Metal device without a window (export, tests, CLI).
+    /// GPU device without a window (export, tests, CLI): Metal on macOS,
+    /// Vulkan elsewhere.
     pub fn headless() -> Result<Self> {
+        let backends = if cfg!(target_os = "macos") { wgpu::Backends::METAL } else { wgpu::Backends::VULKAN };
         let instance = wgpu::Instance::new(wgpu::InstanceDescriptor {
-            backends: wgpu::Backends::METAL,
+            backends,
             ..wgpu::InstanceDescriptor::new_without_display_handle()
         });
         let adapter = pollster::block_on(instance.request_adapter(&wgpu::RequestAdapterOptions {
@@ -24,7 +26,7 @@ impl Gpu {
             force_fallback_adapter: false,
             ..Default::default()
         }))
-        .context("no Metal GPU adapter")?;
+        .context("no GPU adapter")?;
         let (device, queue) = pollster::block_on(adapter.request_device(&wgpu::DeviceDescriptor {
             label: Some("glide"),
             required_limits: wgpu::Limits::default().using_resolution(adapter.limits()),

@@ -65,6 +65,8 @@ pub const CMD: u32 = 1 << 8; // cmdKey
 pub const SHIFT: u32 = 1 << 9; // shiftKey
 pub const OPTION: u32 = 1 << 11; // optionKey
 pub const CONTROL: u32 = 1 << 12; // controlKey
+/// Modifiers for the default record/pause shortcuts (⌥⇧⌘).
+pub const DEFAULT_MODS: u32 = CMD | SHIFT | OPTION;
 
 /// A key combination: macOS virtual key code + Carbon modifier flags.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
@@ -144,7 +146,7 @@ extern "C" fn on_hotkey(_next: *mut c_void, event: *mut c_void, _user: *mut c_vo
 
 /// Bind `combo` to slot `id` (replacing any previous binding of that slot).
 /// Must be called on the main thread. Fails if another app owns the combo.
-pub fn bind(id: u32, combo: Combo, callback: impl Fn() + 'static) -> Result<(), i32> {
+pub fn bind(id: u32, combo: Combo, callback: impl Fn() + Send + 'static) -> Result<(), i32> {
     unbind(id);
     unsafe {
         let target = GetApplicationEventTarget();
@@ -178,7 +180,7 @@ pub fn unbind(id: u32) {
 }
 
 /// Single-binding convenience used before settings existed.
-pub fn register(key: u32, modifiers: u32, callback: impl Fn() + 'static) -> Result<(), i32> {
+pub fn register(key: u32, modifiers: u32, callback: impl Fn() + Send + 'static) -> Result<(), i32> {
     bind(0, Combo::new(key, modifiers), callback)
 }
 

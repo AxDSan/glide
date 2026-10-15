@@ -5,6 +5,7 @@
 //! encoder, frames N+1..N+3 are already rendering.
 
 pub mod audio;
+#[cfg_attr(target_os = "linux", path = "isolate_linux.rs")]
 pub mod isolate;
 pub mod gif;
 
@@ -14,18 +15,25 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Instant;
 
-use anyhow::{Result, bail};
+use anyhow::{Context, Result, bail};
 
 use crate::engine::scene::Scene;
-use crate::media::{FrameSource, Prefetch};
-use crate::media::writer::{MovieWriter, WriterSpec, fill_bgra};
+use crate::media::{Frame, FrameSource, Prefetch};
+use crate::media::writer::{MovieWriter, WriterSpec};
 use crate::project::model::{ExportFormat, ExportSettings, Project};
 use crate::project::recording::Recording;
+#[cfg(target_os = "macos")]
 use crate::render::interop::{TextureCache, Wrapped};
 use crate::render::{Gpu, OUTPUT_FORMAT, Renderer, VideoFrame, gpu::padded_row};
 
 /// Frames in flight between render and encode.
 const IN_FLIGHT: usize = 3;
+
+/// Texture cache for zero-copy upload (macOS). Linux always copies.
+#[cfg(target_os = "macos")]
+type Cache = TextureCache;
+#[cfg(not(target_os = "macos"))]
+type Cache = ();
 
 #[derive(Clone, Debug, Default)]
 pub struct Stats {
@@ -114,27 +122,21 @@ impl Inputs {
     }
 
     /// Upload the media for output frame `i` (prefetched) or a source time.
-    fn feed_index(&mut self, r: &mut Renderer, i: usize, source_ms: f64, cache: Option<&TextureCache>) {
+    fn feed_index(&mut self, r: &mut Renderer, i: usize, source_ms: f64, cache: Option<&Cache>) {
         if self.pre_screen.is_none() && self.pre_camera.is_none() {
             return self.feed(r, source_ms, cache);
         }
         if let Some(f) = self.pre_screen.as_ref().and_then(|p| p.get(i)) {
-            match cache.and_then(|c| c.wrap(&f.pb.0, wgpu::TextureUsages::TEXTURE_BINDING)) {
-                Some(w) => r.set_screen_wrapped(w),
-                None => f.with_bgra(|v| r.set_screen(v)),
-            }
+            put(r, cache, &f, false);
         }
         if let Some(f) = self.pre_camera.as_ref().and_then(|p| p.get(i)) {
-            match cache.and_then(|c| c.wrap(&f.pb.0, wgpu::TextureUsages::TEXTURE_BINDING)) {
-                Some(w) => r.set_camera_wrapped(w),
-                None => f.with_bgra(|v| r.set_camera(v)),
-            }
+            put(r, cache, &f, true);
         }
     }
 
     /// Upload the media for a source time into the renderer. With a
     /// texture cache, decoded frames are used in place (zero copy).
-    fn feed(&mut self, r: &mut Renderer, source_ms: f64, cache: Option<&TextureCache>) {
+    fn feed(&mut self, r: &mut Renderer, source_ms: f64, cache: Option<&Cache>) {
         if let Some((w, h)) = self.synthetic {
             let px = crate::synth::screen_bgra(w, h, source_ms);
             r.set_screen(&VideoFrame { width: w, height: h, stride: (w * 4) as usize, bgra: &px });
@@ -142,20 +144,25 @@ impl Inputs {
         if let Some(s) = &mut self.screen
             && let Some(f) = s.frame_at(source_ms)
         {
-            match cache.and_then(|c| c.wrap(&f.pb.0, wgpu::TextureUsages::TEXTURE_BINDING)) {
-                Some(w) => r.set_screen_wrapped(w),
-                None => f.with_bgra(|v| r.set_screen(v)),
-            }
+            put(r, cache, f, false);
         }
         if let Some(c) = &mut self.camera
             && let Some(f) = c.frame_at(source_ms - self.camera_offset)
         {
-            match cache.and_then(|tc| tc.wrap(&f.pb.0, wgpu::TextureUsages::TEXTURE_BINDING)) {
-                Some(w) => r.set_camera_wrapped(w),
-                None => f.with_bgra(|v| r.set_camera(v)),
-            }
+            put(r, cache, f, true);
         }
     }
+}
+
+/// Upload one decoded frame. macOS tries a zero-copy texture wrap first.
+fn put(r: &mut Renderer, cache: Option<&Cache>, f: &Frame, camera: bool) {
+    #[cfg(target_os = "macos")]
+    if let Some(w) = cache.and_then(|c| c.wrap(&f.pb.0, wgpu::TextureUsages::TEXTURE_BINDING)) {
+        if camera { r.set_camera_wrapped(w) } else { r.set_screen_wrapped(w) }
+        return;
+    }
+    let _ = cache;
+    f.with_bgra(|v| if camera { r.set_camera(v) } else { r.set_screen(v) });
 }
 
 struct Readback {
@@ -311,10 +318,14 @@ fn run_pass(job: &Job, bitrate: Option<u64>, progress: ProgressFn, cancel: &Atom
             if let Some(m) = soundtrack {
                 writer.set_soundtrack(Arc::new(m));
             }
+            #[cfg(target_os = "macos")]
             let cache = TextureCache::new(&pump.renderer.gpu().device);
+            #[cfg(not(target_os = "macos"))]
+            let cache: Option<Cache> = None;
             let result = match &cache {
+                #[cfg(target_os = "macos")]
                 Some(cache) => mp4_zero_copy(job, &mut scene, &mut pump, &mut inputs, cache, &mut writer, total, progress, cancel),
-                None => mp4_readback(job, &mut scene, &mut pump, &mut inputs, &mut writer, total, progress, cancel),
+                _ => mp4_readback(job, &mut scene, &mut pump, &mut inputs, &mut writer, total, progress, cancel),
             };
             match result {
                 Ok(done) => {
@@ -344,6 +355,7 @@ fn run_pass(job: &Job, bitrate: Option<u64>, progress: ProgressFn, cancel: &Atom
 }
 
 /// Render straight into the encoder's IOSurface pixel buffers.
+#[cfg(target_os = "macos")]
 #[allow(clippy::too_many_arguments)]
 fn mp4_zero_copy(
     job: &Job,
@@ -431,9 +443,7 @@ fn mp4_readback(
     let (w, h) = (pump.w, pump.h);
     let mut done = 0u64;
     let encode = |pump: &mut FramePump, writer: &mut MovieWriter, done: &mut u64| -> Result<()> {
-        let pb = writer.buffer()?;
-        pump.take(|rows, stride| fill_bgra(&pb, rows, w, h, stride));
-        writer.push_frame(&pb)?;
+        pump.take(|rows, stride| writer.push_bgra(rows, w, h, stride)).context("no frame pending")??;
         *done += 1;
         Ok(())
     };

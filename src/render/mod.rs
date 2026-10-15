@@ -6,6 +6,7 @@ pub mod art;
 pub mod bgcheck;
 pub mod gpu;
 pub mod icon;
+#[cfg(target_os = "macos")]
 pub mod interop;
 pub mod text;
 
@@ -144,6 +145,7 @@ pub struct Renderer {
     has_screen: bool,
     has_camera: bool,
     /// Zero-copy frames still possibly in use by the GPU.
+    #[cfg(target_os = "macos")]
     keep: std::collections::VecDeque<interop::Wrapped>,
 }
 
@@ -238,6 +240,7 @@ impl Renderer {
             text_used: vec![],
             has_screen: false,
             has_camera: false,
+            #[cfg(target_os = "macos")]
             keep: std::collections::VecDeque::new(),
         };
         r.upload(TexId::Dummy, &Image { width: 1, height: 1, rgba: vec![0, 0, 0, 0] }, false);
@@ -349,6 +352,7 @@ impl Renderer {
         );
     }
 
+    #[cfg(target_os = "macos")]
     fn set_wrapped(&mut self, id: TexId, w: interop::Wrapped) {
         let bind = self.make_bind(&w.view);
         self.textures.insert(id, Tex { texture: w.texture.clone(), bind, size: w.size });
@@ -359,11 +363,13 @@ impl Renderer {
     }
 
     /// Use an IOSurface-backed frame directly (no copy).
+    #[cfg(target_os = "macos")]
     pub fn set_screen_wrapped(&mut self, w: interop::Wrapped) {
         self.set_wrapped(TexId::Screen, w);
         self.has_screen = true;
     }
 
+    #[cfg(target_os = "macos")]
     pub fn set_camera_wrapped(&mut self, w: interop::Wrapped) {
         self.set_wrapped(TexId::Camera, w);
         self.has_camera = true;

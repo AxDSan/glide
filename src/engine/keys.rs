@@ -21,11 +21,24 @@ pub struct Badge {
     pub count: usize,
 }
 
+#[cfg(not(target_os = "linux"))]
 pub fn label(e: &KeyEvent) -> String {
     let mut s = String::new();
     for (bit, glyph) in [(mods::CTRL, "⌃"), (mods::OPT, "⌥"), (mods::SHIFT, "⇧"), (mods::CMD, "⌘"), (mods::FN, "fn ")] {
         if e.mods & bit != 0 {
             s.push_str(glyph);
+        }
+    }
+    s.push_str(&e.key);
+    s
+}
+
+#[cfg(target_os = "linux")]
+pub fn label(e: &KeyEvent) -> String {
+    let mut s = String::new();
+    for (bit, word) in [(mods::CTRL, "Ctrl+"), (mods::OPT, "Alt+"), (mods::SHIFT, "Shift+"), (mods::CMD, "Super+"), (mods::FN, "Fn+")] {
+        if e.mods & bit != 0 {
+            s.push_str(word);
         }
     }
     s.push_str(&e.key);
@@ -98,7 +111,8 @@ mod tests {
         ];
         let b = badges(&ev, false);
         let labels: Vec<_> = b.iter().map(|b| b.label.as_str()).collect();
-        assert_eq!(labels, ["⌘S", "⏎", "⇧⌘C"]);
+        // Expected text is platform glyphs (⌘ on macOS, Super+ on Linux).
+        assert_eq!(labels, [label(&ev[2]), label(&ev[4]), label(&ev[5])]);
         assert_eq!(b[0].count, 2);
         assert_eq!(b[0].end, 1500.0 + HOLD_MS);
     }

@@ -69,10 +69,10 @@ pub struct Hotkeys {
 
 impl Default for Hotkeys {
     fn default() -> Self {
-        use super::hotkey::{CMD, KEY_R, OPTION, SHIFT};
+        use super::hotkey::{DEFAULT_MODS, KEY_R};
         Hotkeys {
-            record: Some(Combo::new(KEY_R, CMD | SHIFT | OPTION)),
-            pause: Some(Combo::new(35, CMD | SHIFT | OPTION)), // P
+            record: Some(Combo::new(KEY_R, DEFAULT_MODS)),
+            pause: Some(Combo::new(35, DEFAULT_MODS)), // P
             cancel: None,
         }
     }
@@ -112,8 +112,7 @@ impl Default for Settings {
 }
 
 fn settings_path() -> PathBuf {
-    let home = std::env::var_os("HOME").map(PathBuf::from).unwrap_or_default();
-    home.join("Library/Application Support/Glide/settings.json")
+    crate::util::config_dir().join("settings.json")
 }
 
 impl Settings {
@@ -184,6 +183,20 @@ pub struct Devices {
     pub ios: Vec<Device>,
 }
 
+/// Glide's own windows, which the picker must not offer.
+#[cfg(target_os = "macos")]
+fn is_own(w: &crate::capture::screen::WindowInfo) -> bool {
+    let me = std::process::id() as i32;
+    // SAFETY: SCWindow/SCRunningApplication accessors.
+    unsafe { w.window.owningApplication().is_some_and(|a| a.processID() == me) }
+}
+
+/// KWin already drops Glide's own windows, so nothing is left to filter.
+#[cfg(not(target_os = "macos"))]
+fn is_own(_: &crate::capture::screen::WindowInfo) -> bool {
+    false
+}
+
 impl Devices {
     pub fn load() -> Self {
         use crate::capture::{camera, screen};
@@ -194,12 +207,7 @@ impl Devices {
             windows: screen::windows()
                 .map(|ws| {
                     // Untitled windows too (the on-screen picker offers them).
-                    let me = std::process::id() as i32;
-                    // SAFETY: SCWindow/SCRunningApplication accessors.
-                    let ws: Vec<_> = ws
-                        .into_iter()
-                        .filter(|w| !w.app.is_empty() && w.app != "Glide" && unsafe { w.window.owningApplication().is_none_or(|a| a.processID() != me) })
-                        .collect();
+                    let ws: Vec<_> = ws.into_iter().filter(|w| !w.app.is_empty() && w.app != "Glide" && !is_own(w)).collect();
                     let displays = crate::capture::winsize::display_sizes(&ws);
                     ws.into_iter()
                         .zip(displays)
@@ -272,8 +280,11 @@ impl Thumbs {
             let tx = self.queue.get_or_insert_with(|| {
                 let (tx, rx) = std::sync::mpsc::channel::<(PathBuf, egui::Context)>();
                 std::thread::spawn(move || {
+                    // One device for the worker's lifetime: creating a Vulkan device per
+                    // thumbnail is slow, and tearing one down while another starts is unsafe.
+                    let mut gpu = None;
                     for (p, ctx) in rx {
-                        if let Some(img) = thumbnail(&p) {
+                        if let Some(img) = thumbnail(&p, &mut gpu) {
                             pending.lock().unwrap().push((p, img));
                             ctx.request_repaint();
                         }
@@ -298,7 +309,7 @@ fn modified(p: &Path) -> Option<SystemTime> {
 
 /// Load `thumb.png` (unless the project changed since) or render one from a
 /// moment without a zoom, so it shows the whole composition.
-fn thumbnail(path: &Path) -> Option<crate::render::Image> {
+fn thumbnail(path: &Path, gpu: &mut Option<crate::render::Gpu>) -> Option<crate::render::Image> {
     let pkg = Package::new(path);
     let thumb = path.join("thumb.png");
     if modified(&thumb) >= modified(&pkg.project_file())
@@ -307,7 +318,7 @@ fn thumbnail(path: &Path) -> Option<crate::render::Image> {
         let img = img.to_rgba8();
         return Some(crate::render::Image { width: img.width(), height: img.height(), rgba: img.into_raw() });
     }
-    objc2::rc::autoreleasepool(|_| {
+    crate::util::autoreleasepool(|| {
         let (p, rec) = pkg.load().ok()?;
         let mut scene = crate::engine::scene::Scene::new(p.clone(), &rec, 30.0);
         let d = scene.duration();
@@ -316,7 +327,10 @@ fn thumbnail(path: &Path) -> Option<crate::render::Image> {
             .find(|&t| crate::engine::zoom::active(&p.timeline.zooms, scene.map.to_source(t)).is_none())
             .unwrap_or(0.0);
         let frame = scene.frame(t, 270.0);
-        let gpu = crate::render::Gpu::headless().ok()?;
+        if gpu.is_none() {
+            *gpu = Some(crate::render::Gpu::headless().ok()?);
+        }
+        let gpu = gpu.as_ref()?.clone();
         let mut r = crate::render::Renderer::new(gpu);
         r.prepare(&p.style, &rec, Some(path));
         let mut src = crate::media::FrameSource::open(&pkg.rec(&rec.meta.screen.file)).ok()?;
@@ -902,7 +916,7 @@ fn bubble_rect(style: &crate::project::model::CameraStyle, frame: egui::Rect, ca
 fn outline_mesh(pts: &[egui::Pos2], c: egui::Pos2, tex: egui::TextureId, color: Color32, uv: impl Fn(egui::Pos2) -> egui::Pos2) -> egui::Mesh {
     let mut m = egui::Mesh::with_texture(tex);
     let n = pts.len() as u32;
-    m.colored_vertex(c, color);
+    m.vertices.push(egui::epaint::Vertex { pos: c, uv: egui::Pos2::ZERO, color });
     m.vertices[0].uv = uv(c);
     for (i, &p) in pts.iter().enumerate() {
         let (prev, next) = (pts[(i + pts.len() - 1) % pts.len()], pts[(i + 1) % pts.len()]);

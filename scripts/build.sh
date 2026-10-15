@@ -1,13 +1,28 @@
 #!/bin/sh
-# Build glide, assemble dist/Glide.app with its icon, and code-sign it with a
-# stable identity so macOS privacy grants (screen, mic, camera, speech)
-# survive rebuilds. Usage: scripts/build.sh   (PROFILE=debug for a debug build)
+# Build glide and package it for this OS. macOS: assemble dist/Glide.app with
+# its icon, code-signed with a stable identity so privacy grants (screen, mic,
+# camera, speech) survive rebuilds. Linux: stage dist/glide-linux (binary and
+# hicolor icons) for scripts/install.sh.
+# Usage: scripts/build.sh   (PROFILE=debug for a debug build)
 set -eu
 cd "$(dirname "$0")/.."
 PROFILE="${PROFILE:-release}"
 . scripts/env.sh
 if [ "$PROFILE" = release ]; then cargo build --release; else cargo build; fi
 BIN="$CARGO_TARGET_DIR/$PROFILE/glide"
+if [ "$(uname -s)" = Linux ]; then
+  OUT=dist/glide-linux
+  rm -rf "$OUT"
+  mkdir -p "$OUT"
+  cp "$BIN" "$OUT/glide"
+  for s in 16 32 48 64 128 256 512; do
+    dir="$OUT/icons/hicolor/${s}x${s}/apps"
+    mkdir -p "$dir"
+    "$BIN" icon "$dir/glide.png" --png "$s" >/dev/null
+  done
+  echo "built $OUT (install with scripts/install.sh)"
+  exit 0
+fi
 APP=dist/Glide.app
 STAGE=dist/.Glide.app.new
 # Build the bundle beside the old one and swap it in, so a running copy keeps

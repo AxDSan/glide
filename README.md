@@ -71,6 +71,22 @@ scripts/build.sh          # release build → dist/Glide.app (signed), dist/glid
 open dist/Glide.app
 ```
 
+### Linux (KDE Plasma Wayland)
+
+Requires Rust, CMake, `glslc` and Vulkan headers (whisper.cpp), `pipewire-devel`,
+ffmpeg with NVENC or x264/x265, xdg-desktop-portal, and membership in the `input`
+group (clicks, keys and global hotkeys come from evdev).
+
+```sh
+scripts/build.sh          # release build → dist/glide-linux
+scripts/install.sh        # ~/.local/bin/glide, glide.desktop, icons
+```
+
+Screen capture goes through the ScreenCast portal (KDE asks once; the choice is
+remembered). Not available on Linux: iPhone/iPad capture, hiding desktop icons
+or the Dock, Apple Speech captions, and the floating recording bar (use the tray
+item or Ctrl+Alt+Shift+R).
+
 Build output goes to `~/.cache/cargo-target/screenstudio-rs` (override with
 `CARGO_TARGET_DIR`), never into the repository.
 

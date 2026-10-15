@@ -1,5 +1,5 @@
 //! Style presets: a project's `Style` saved by name to
-//! `~/Library/Application Support/Glide/presets/<name>.json`, applied to any
+//! `<config dir>/presets/<name>.json` (see `util::config_dir`), applied to any
 //! project, and optionally used as the default for new recordings.
 
 use std::path::{Path, PathBuf};
@@ -10,8 +10,7 @@ use super::model::{Background, Style};
 use super::{read_json, write_json};
 
 pub fn dir() -> PathBuf {
-    let home = std::env::var_os("HOME").map(PathBuf::from).unwrap_or_default();
-    home.join("Library/Application Support/Glide/presets")
+    crate::util::config_dir().join("presets")
 }
 
 fn default_marker(dir: &Path) -> PathBuf {

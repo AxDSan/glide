@@ -1,6 +1,6 @@
-//! Captions with Whisper (whisper.cpp, Metal): on-device, no Speech
-//! permission needed, word-level timings. Models are downloaded on first
-//! use into `~/Library/Application Support/Glide/models`.
+//! Captions with Whisper (whisper.cpp; Metal on macOS, Vulkan on Linux):
+//! on-device, no Speech permission needed, word-level timings. Models are
+//! downloaded on first use into the Glide data directory's `models` folder.
 
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -61,8 +61,7 @@ impl Model {
 }
 
 fn models_dir() -> PathBuf {
-    let home = std::env::var_os("HOME").map(PathBuf::from).unwrap_or_default();
-    home.join("Library/Application Support/Glide/models")
+    crate::util::data_dir().join("models")
 }
 
 /// The largest model already on disk.
@@ -79,8 +78,11 @@ pub struct Progress {
     pub phase: AtomicU32,
 }
 
-/// Download `model` unless it's already there (with /usr/bin/curl, into a
-/// partial file that is renamed when complete).
+/// `curl` used for model downloads.
+const CURL: &str = if cfg!(target_os = "macos") { "/usr/bin/curl" } else { "curl" };
+
+/// Download `model` unless it's already there (with curl, into a partial
+/// file that is renamed when complete).
 pub fn download(model: Model, progress: &Progress) -> Result<PathBuf> {
     let path = model.path();
     if model.is_downloaded() {
@@ -88,7 +90,7 @@ pub fn download(model: Model, progress: &Progress) -> Result<PathBuf> {
     }
     std::fs::create_dir_all(models_dir())?;
     let part = path.with_extension("bin.part");
-    let mut child = std::process::Command::new("/usr/bin/curl")
+    let mut child = std::process::Command::new(CURL)
         .args(["--fail", "--location", "--silent", "--show-error", "--retry", "3", "--output"])
         .arg(&part)
         .arg(model.url())
@@ -210,8 +212,9 @@ mod tests {
         assert_eq!((w[2].start, w[2].end), (1000.0, 1300.0));
     }
 
-    /// Speech made with macOS `say` comes back as the same words. Skipped
-    /// when the base model hasn't been downloaded (`glide transcribe`).
+    const PHRASE: &str = "Record the screen and zoom into every click.";
+    /// Speech from `say` (macOS) or `espeak-ng` (Linux) comes back as the same
+    /// words. Skipped when the base model hasn't been downloaded (`glide transcribe`).
     #[test]
     fn transcribes_synthesized_speech() {
         if !Model::Base.is_downloaded() {
@@ -220,15 +223,15 @@ mod tests {
         }
         let dir = std::env::temp_dir().join(format!("glide-whisper-test-{}", std::process::id()));
         std::fs::create_dir_all(&dir).unwrap();
-        let file = dir.join("speech.aiff");
-        let ok = std::process::Command::new("say")
-            .args(["-o"])
-            .arg(&file)
-            .arg("Record the screen and zoom into every click.")
-            .status()
-            .is_ok_and(|s| s.success());
+        let file = dir.join(if cfg!(target_os = "macos") { "speech.aiff" } else { "speech.wav" });
+        let ok = if cfg!(target_os = "macos") {
+            std::process::Command::new("say").arg("-o").arg(&file).arg(PHRASE).status()
+        } else {
+            std::process::Command::new("espeak-ng").arg("-w").arg(&file).arg(PHRASE).status()
+        }
+        .is_ok_and(|s| s.success());
         if !ok {
-            eprintln!("`say` unavailable; skipping");
+            eprintln!("speech synthesizer unavailable; skipping");
             return;
         }
         let stereo = crate::media::read_audio(&file, 0).unwrap();

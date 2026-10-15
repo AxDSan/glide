@@ -142,8 +142,7 @@ pub fn write_json<T: Serialize>(path: &Path, value: &T) -> Result<()> {
 
 /// Default folder for new projects.
 pub fn projects_dir() -> PathBuf {
-    let home = std::env::var_os("HOME").map(PathBuf::from).unwrap_or_else(|| PathBuf::from("."));
-    home.join("Movies").join("Glide")
+    crate::util::videos_dir()
 }
 
 /// A new, unused package path like `~/Movies/Glide/Recording 2026-10-11 at 11.30.12.glide`.

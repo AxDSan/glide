@@ -7,6 +7,7 @@
 # another app is recorded, played back in the editor (and heard), and
 # exported. The audio checks play a quiet 1234 Hz tone through the speakers.
 # Outputs go to $GLIDE_TEST_DIR (default ~/Movies/glide-tests), never the repo.
+if [ "$(uname -s)" != Darwin ]; then echo "selftest.sh is macOS-only; on Linux run cargo test and the CLI checks" >&2; exit 1; fi
 set -eu
 cd "$(dirname "$0")/.."
 . scripts/env.sh

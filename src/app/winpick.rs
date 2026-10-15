@@ -6,7 +6,10 @@ use std::sync::Mutex;
 
 use super::home::WindowEntry;
 use super::macos;
+#[cfg(target_os = "macos")]
 use crate::capture::{screen, winsize};
+#[cfg(not(target_os = "macos"))]
+use crate::capture::{kwin, screen};
 
 /// A window the picker can offer.
 #[derive(Clone, Debug)]
@@ -42,6 +45,7 @@ pub fn list_all() -> Vec<PickWindow> {
 
 /// Recordable windows (not Glide's own) that show on `display`,
 /// frontmost first.
+#[cfg(target_os = "macos")]
 pub fn list(display: u32) -> Vec<PickWindow> {
     let (display_id, dx, dy, dw, dh) = macos::display_frame(display);
     let screen_rect = egui::Rect::from_min_size(egui::Pos2::ZERO, egui::vec2(dw as f32, dh as f32));
@@ -76,6 +80,36 @@ pub fn list(display: u32) -> Vec<PickWindow> {
         .collect();
     out.sort_by_key(|(z, _)| *z);
     out.into_iter().map(|(_, w)| w).collect()
+}
+
+/// Recordable windows on `display`, front to back. KWin reports global logical
+/// geometry, so each window is placed relative to its output's origin.
+#[cfg(not(target_os = "macos"))]
+pub fn list(display: u32) -> Vec<PickWindow> {
+    let (display_id, _, _, dw, dh) = macos::display_frame(display);
+    let screen_rect = egui::Rect::from_min_size(egui::Pos2::ZERO, egui::vec2(dw as f32, dh as f32));
+    let (Ok(all), Ok(frames), Ok(outputs)) = (screen::windows(), kwin::windows(), kwin::outputs()) else { return vec![] };
+    let Some(output) = outputs.iter().find(|o| screen::key32(&o.name) == display_id) else { return vec![] };
+    let mut out = vec![];
+    // `screen::windows()` keeps KWin's front-to-back order.
+    for w in all {
+        let Some(f) = frames.iter().find(|f| screen::key32(&f.id) == w.id) else { continue };
+        if f.output != output.name {
+            continue;
+        }
+        let rect = egui::Rect::from_min_size(
+            egui::pos2((f.rect[0] - output.rect[0]) as f32, (f.rect[1] - output.rect[1]) as f32),
+            egui::vec2(f.rect[2] as f32, f.rect[3] as f32),
+        );
+        let visible = rect.intersect(screen_rect);
+        if visible.width() < 40.0 || visible.height() < 40.0 {
+            continue;
+        }
+        let label = if w.title.is_empty() { w.app.clone() } else { format!("{} — {}", w.app, w.title) };
+        let entry = WindowEntry { id: w.id, label, size: w.size, display: (dw, dh) };
+        out.push(PickWindow { entry, app: w.app, title: w.title, rect, display: display_id });
+    }
+    out
 }
 
 /// The frontmost picker window under `p`.

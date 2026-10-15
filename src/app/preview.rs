@@ -7,12 +7,14 @@ use crate::engine::scene::{Frame, Scene};
 use crate::media::FrameSource;
 use crate::project::model::Project;
 use crate::project::recording::Recording;
+#[cfg(target_os = "macos")]
 use crate::render::interop::TextureCache;
 use crate::render::{Gpu, OUTPUT_FORMAT, Renderer};
 
 pub struct Preview {
     pub scene: Scene,
     renderer: Renderer,
+    #[cfg(target_os = "macos")]
     cache: Option<TextureCache>,
     screen: Option<FrameSource>,
     camera: Option<FrameSource>,
@@ -31,12 +33,14 @@ impl Preview {
         let rd = package.join("recording");
         let screen = FrameSource::open(&rd.join(&rec.meta.screen.file)).ok();
         let camera = rec.meta.camera.as_ref().and_then(|c| FrameSource::open(&rd.join(&c.file)).ok());
+        #[cfg(target_os = "macos")]
         let cache = TextureCache::new(&gpu.device);
         let mut renderer = Renderer::new(gpu);
         renderer.prepare(&project.style, rec, Some(&package));
         Preview {
             scene: Scene::new(project.clone(), rec, 60.0),
             renderer,
+            #[cfg(target_os = "macos")]
             cache,
             screen,
             camera,
@@ -105,18 +109,24 @@ impl Preview {
         if let Some(s) = &mut self.screen
             && let Some(vf) = s.frame_at(src)
         {
+            #[cfg(target_os = "macos")]
             match self.cache.as_ref().and_then(|c| c.wrap(&vf.pb.0, wgpu::TextureUsages::TEXTURE_BINDING)) {
                 Some(wr) => self.renderer.set_screen_wrapped(wr),
                 None => vf.with_bgra(|v| self.renderer.set_screen(v)),
             }
+            #[cfg(not(target_os = "macos"))]
+            vf.with_bgra(|v| self.renderer.set_screen(v));
         }
         if let Some(c) = &mut self.camera
             && let Some(vf) = c.frame_at(src - self.camera_offset)
         {
+            #[cfg(target_os = "macos")]
             match self.cache.as_ref().and_then(|tc| tc.wrap(&vf.pb.0, wgpu::TextureUsages::TEXTURE_BINDING)) {
                 Some(wr) => self.renderer.set_camera_wrapped(wr),
                 None => vf.with_bgra(|v| self.renderer.set_camera(v)),
             }
+            #[cfg(not(target_os = "macos"))]
+            vf.with_bgra(|v| self.renderer.set_camera(v));
         }
         let style = self.scene.project.style.clone();
         let mut enc = gpu.device.create_command_encoder(&Default::default());

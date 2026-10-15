@@ -187,7 +187,7 @@ fn background(ui: &mut Ui, ed: &mut Editor, d: &mut Project) {
                     {
                         *path = rel;
                     }
-                    if ui.button("Desktop wallpaper").on_hover_text("Use your current macOS desktop picture").clicked() {
+                    if ui.button("Desktop wallpaper").on_hover_text(if cfg!(target_os = "macos") { "Use your current macOS desktop picture" } else { "Use your current desktop wallpaper" }).clicked() {
                         let tmp = std::env::temp_dir().join(format!("glide-wallpaper-{}.png", std::process::id()));
                         match super::macos::save_desktop_wallpaper(&tmp).and_then(|_| ed.package.import_asset(&tmp, "wallpaper")) {
                             Ok(rel) => *path = rel,
@@ -438,14 +438,22 @@ fn transcribe_controls(ui: &mut Ui, ed: &mut Editor) {
         ui.ctx().request_repaint_after(std::time::Duration::from_millis(250));
         return;
     }
-    let mut whisper = matches!(ed.caption_engine, Engine::Whisper(_));
-    row(ui, "Engine", |ui| {
-        segmented(ui, &mut whisper, &[(true, "Whisper"), (false, "Apple")]);
-    });
-    match (whisper, ed.caption_engine) {
-        (true, Engine::Apple) => ed.caption_engine = Engine::Whisper(crate::whisper::best_downloaded().unwrap_or(Model::Base)),
-        (false, Engine::Whisper(_)) => ed.caption_engine = Engine::Apple,
-        _ => {}
+    #[cfg(target_os = "macos")]
+    {
+        let mut whisper = matches!(ed.caption_engine, Engine::Whisper(_));
+        row(ui, "Engine", |ui| {
+            segmented(ui, &mut whisper, &[(true, "Whisper"), (false, "Apple")]);
+        });
+        match (whisper, ed.caption_engine) {
+            (true, Engine::Apple) => ed.caption_engine = Engine::Whisper(crate::whisper::best_downloaded().unwrap_or(Model::Base)),
+            (false, Engine::Whisper(_)) => ed.caption_engine = Engine::Apple,
+            _ => {}
+        }
+    }
+    // Apple's Speech framework is macOS-only; Linux transcribes with Whisper.
+    #[cfg(not(target_os = "macos"))]
+    if matches!(ed.caption_engine, Engine::Apple) {
+        ed.caption_engine = Engine::Whisper(crate::whisper::best_downloaded().unwrap_or(Model::Base));
     }
     if let Engine::Whisper(mut model) = ed.caption_engine {
         let label = |m: Model| {
@@ -459,7 +467,7 @@ fn transcribe_controls(ui: &mut Ui, ed: &mut Editor) {
             });
         });
         ed.caption_engine = Engine::Whisper(model);
-        caption(ui, "Runs on this Mac with Whisper. Larger models are more accurate but slower.");
+        caption(ui, if cfg!(target_os = "macos") { "Runs on this Mac with Whisper. Larger models are more accurate but slower." } else { "Runs on this computer with Whisper. Larger models are more accurate but slower." });
     } else {
         caption(ui, "Uses Apple's on-device speech recognition (asks for Speech Recognition access).");
     }
@@ -489,7 +497,11 @@ fn audio(ui: &mut Ui, ed: &mut Editor, d: &mut Project) {
         if ed.rec.meta.system_audio.is_some() {
             toggle_row(ui, "Mute system audio", &mut a.mute_system);
             if silent(peaks.and_then(|p| p.system)) {
-                caption(ui, "System audio is silent: nothing played that ScreenCaptureKit could capture (sounds from command-line tools aren't).");
+                caption(ui, if cfg!(target_os = "macos") {
+                    "System audio is silent: nothing played that ScreenCaptureKit could capture (sounds from command-line tools aren't)."
+                } else {
+                    "System audio is silent: nothing played that the screen capture could record."
+                });
             }
         }
         if ed.rec.meta.mic.is_none() && ed.rec.meta.system_audio.is_none() {

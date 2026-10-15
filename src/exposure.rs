@@ -187,7 +187,7 @@ pub fn scan(video: &Path, masks: &[Mask], cache: &mut Cache, cancelled: &dyn Fn(
                 return Ok(vec![]);
             }
             let rect = todo[i].rect;
-            let patch = objc2::rc::autoreleasepool(|_| {
+            let patch = crate::util::autoreleasepool(|| {
                 src.frame_at(t).and_then(|f| f.with_bgra(|v| Patch::from_bgra(v.bgra, v.width, v.height, v.stride, rect)))
             });
             let Some(patch) = patch else { continue };

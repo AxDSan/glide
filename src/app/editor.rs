@@ -153,7 +153,11 @@ pub struct Editor {
 pub fn silence_note(rec: &Recording, p: TrackPeaks) -> &'static str {
     match (rec.meta.mic.is_some(), rec.meta.system_audio.is_some()) {
         (false, false) => "This recording has no audio: system audio and the microphone were off.",
-        (false, true) => "This recording is silent: the microphone was off and the Mac played nothing ScreenCaptureKit could capture.",
+        (false, true) => if cfg!(target_os = "macos") {
+            "This recording is silent: the microphone was off and the Mac played nothing ScreenCaptureKit could capture."
+        } else {
+            "This recording is silent: the microphone was off and nothing played that the screen capture could record."
+        },
         (true, _) if p.mic.is_some() => "This recording is silent: the microphone only picked up silence (lid closed or muted input?).",
         _ => "This recording's audio couldn't be read.",
     }
@@ -372,7 +376,7 @@ impl Editor {
         let progress = std::sync::Arc::new(crate::whisper::Progress::default());
         self.transcribe_progress = progress.clone();
         self.transcribing = Some(std::thread::spawn(move || {
-            objc2::rc::autoreleasepool(|_| crate::transcribe::transcribe_package(&pkg, engine, &progress)).map_err(|e| format!("{e:#}"))
+            crate::util::autoreleasepool(|| crate::transcribe::transcribe_package(&pkg, engine, &progress)).map_err(|e| format!("{e:#}"))
         }));
     }
 
@@ -556,7 +560,7 @@ impl Editor {
         let cancel = Arc::new(AtomicBool::new(false));
         let (p2, c2) = (progress.clone(), cancel.clone());
         let handle = std::thread::spawn(move || {
-            objc2::rc::autoreleasepool(|_| export::run(&job, &mut |f| p2.store(f.to_bits(), Ordering::Relaxed), &c2))
+            crate::util::autoreleasepool(|| export::run(&job, &mut |f| p2.store(f.to_bits(), Ordering::Relaxed), &c2))
         });
         self.export.result = None;
         self.export.running = Some(ExportRun { progress, cancel, handle: Some(handle), output, started: Instant::now() });

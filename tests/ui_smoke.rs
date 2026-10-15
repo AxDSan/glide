@@ -15,7 +15,8 @@ fn frame(ctx: &egui::Context, t: f64, f: impl FnMut(&mut egui::Ui)) {
         time: Some(t),
         ..Default::default()
     };
-    let _ = ctx.run_ui(input, f);
+    let mut out = ctx.run_ui(input, f);
+    out.textures_delta.clear(); // epaint asserts deltas are empty on drop; this harness never uploads them
 }
 
 #[test]
@@ -157,5 +158,14 @@ fn editor_and_home_render_every_panel() {
         let a = home::recents(ui, &projects, &mut thumbs, Some(&root), &dir);
         assert!(matches!(a, home::Action::None));
     });
+    // Thumbnails render on a background thread that creates its own GPU device.
+    // Wait for this project's thumbnail so the process never exits while that
+    // thread is still inside the driver.
+    let thumb_path = projects[0].path.clone();
+    let started = std::time::Instant::now();
+    while thumbs.get(&ctx, &thumb_path).is_none() {
+        assert!(started.elapsed() < Duration::from_secs(60), "thumbnail for {thumb_path:?} never rendered");
+        std::thread::sleep(Duration::from_millis(50));
+    }
     let _ = std::fs::remove_dir_all(&dir);
 }

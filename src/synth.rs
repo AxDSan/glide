@@ -157,7 +157,7 @@ pub fn add_tone(output: &std::path::Path, hz: f64) -> anyhow::Result<()> {
 }
 
 fn write(output: &std::path::Path, rec: Recording, duration: f64) -> anyhow::Result<(u64, usize)> {
-    use crate::media::writer::{MovieWriter, WriterSpec, fill_bgra};
+    use crate::media::writer::{MovieWriter, WriterSpec};
     use crate::project::{self, Package, model::Codec};
     let (width, height) = (rec.meta.screen.width, rec.meta.screen.height);
     let pkg = Package::new(output);
@@ -170,9 +170,7 @@ fn write(output: &std::path::Path, rec: Recording, duration: f64) -> anyhow::Res
     let frames = (duration * fps as f64) as u64;
     for i in 0..frames {
         let px = screen_bgra(width, height, i as f64 * 1000.0 / fps as f64);
-        let pb = w.buffer()?;
-        fill_bgra(&pb, &px, width, height, (width * 4) as usize);
-        w.push_frame(&pb)?;
+        w.push_bgra(&px, width, height, (width * 4) as usize)?;
     }
     w.finish()?;
     project::write_json(&pkg.rec("meta.json"), &rec.meta)?;

@@ -2,18 +2,21 @@
 //! system audio and microphone stems, the camera as its own file, and
 //! input events for re-rendering the cursor, zooms and key badges.
 
+#[cfg_attr(target_os = "linux", path = "input_linux.rs")]
 pub mod input;
 
 use std::path::PathBuf;
+use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 use anyhow::{Context, Result, bail};
 
 use crate::capture::camera::Camera;
 use crate::capture::compose::{Corner, PipSpec, Scene as CapScene, Shape};
-use crate::capture::record::{MicBackend, Options as CapOptions, Session, Shared};
+#[cfg(target_os = "macos")]
+use crate::capture::record::MicBackend;
+use crate::capture::record::{Options as CapOptions, Session, Shared};
 use crate::capture::screen;
 use crate::capture::writer::{AudioLayout, Codec as CapCodec, Sink, VideoSpec};
 use crate::engine::geom::Rect;
@@ -21,8 +24,27 @@ use crate::project::recording::{
     AudioTrack, CursorImage, KeyEvent, MouseEvent, RecordingMeta, SourceKind, VideoTrack,
 };
 use crate::project::{self, Package};
-use crate::util::*;
+#[cfg(target_os = "macos")]
+use crate::util::{PIX_BGRA, host_now, secs};
 use input::{InputLog, InputLogger};
+#[cfg(not(target_os = "macos"))]
+const PIX_BGRA: u32 = 0;
+
+/// Installs SIGUSR1 (pause) and SIGUSR2 (resume) handlers for a running `record`.
+/// The record loop polls `take_pause_request` / `take_resume_request`.
+pub fn install_pause_signals() {
+    crate::capture::record::install_pause_signals();
+}
+
+/// True once for each SIGUSR1 received since the last call.
+pub fn take_pause_request() -> bool {
+    crate::capture::record::PAUSE_REQ.swap(false, std::sync::atomic::Ordering::SeqCst)
+}
+
+/// True once for each SIGUSR2 received since the last call.
+pub fn take_resume_request() -> bool {
+    crate::capture::record::RESUME_REQ.swap(false, std::sync::atomic::Ordering::SeqCst)
+}
 
 #[derive(Clone, Debug, PartialEq)]
 pub enum Target {
@@ -53,7 +75,9 @@ pub struct Options {
     pub dir: PathBuf,
     /// Package file name stem (default: "Recording <date>").
     pub name: Option<String>,
+    /// macOS only; ignored with a warning elsewhere.
     pub hide_desktop_icons: bool,
+    /// macOS only; ignored with a warning elsewhere.
     pub hide_dock: bool,
     /// Leave this app's own sounds out of the system audio. ScreenCaptureKit
     /// treats every running copy of Glide as this app, so the command line
@@ -91,10 +115,17 @@ struct CameraRec {
 impl CameraRec {
     fn start(sel: Option<&str>, path: &std::path::Path) -> Result<Self> {
         let spec = VideoSpec { width: 1280, height: 720, fps: 30, codec: CapCodec::H264, bitrate: 8_000_000, quality: None, pixel_format: PIX_BGRA };
-        Self::start_spec(path, &spec, |shared| Camera::start_with(sel, shared, true))
+        Self::start_spec(path, &spec, |shared| {
+            #[cfg(target_os = "macos")]
+            let cam = Camera::start_with(sel, shared, true)?;
+            #[cfg(not(target_os = "macos"))]
+            let cam = Camera::start(sel, shared)?;
+            Ok(cam)
+        })
     }
 
     /// An iOS device's screen at its native size.
+    #[cfg(target_os = "macos")]
     fn start_ios(id: &str, path: &std::path::Path, size: (usize, usize)) -> Result<Self> {
         let bitrate = ((size.0 * size.1) as f64 * 60.0 * 0.08) as u64;
         let spec = VideoSpec { width: size.0, height: size.1, fps: 60, codec: CapCodec::Hevc, bitrate: bitrate.max(4_000_000), quality: None, pixel_format: PIX_BGRA };
@@ -104,13 +135,23 @@ impl CameraRec {
     fn start_spec(path: &std::path::Path, spec: &VideoSpec, open: impl FnOnce(Arc<Shared>) -> Result<Camera>) -> Result<Self> {
         let sink = Sink::new(Some(path), spec, false, false, AudioLayout::Stems, [0.0; 2], None, CapScene::Screen, None)?;
         let stop = Arc::new(AtomicBool::new(false));
-        let shared = Arc::new(Shared { sink: Mutex::new(Some(sink)), error: Mutex::new(None), stop: stop.clone() });
+        let shared = Shared::new_sink(sink, stop.clone());
         let cam = open(shared.clone())?;
         let (ps, pstop) = (shared.clone(), stop.clone());
         let pacer = std::thread::spawn(move || {
             while !pstop.load(Ordering::SeqCst) {
-                let now = secs(host_now());
-                objc2::rc::autoreleasepool(|_| ps.with(|s| s.emit_until(now - s.lag())));
+                let t = now();
+                #[cfg(target_os = "macos")]
+                pool(|| ps.with(|s| s.emit_until(t - s.lag())));
+                // Linux: one write per lock hold, so a blocked ffmpeg write cannot starve other sink users.
+                #[cfg(not(target_os = "macos"))]
+                pool(|| loop {
+                    let mut more = false;
+                    ps.with(|s| more = s.emit_until(t - s.lag(), 1));
+                    if !more || pstop.load(Ordering::SeqCst) {
+                        break;
+                    }
+                });
                 std::thread::sleep(Duration::from_millis(16));
             }
         });
@@ -124,31 +165,34 @@ impl CameraRec {
     }
 
     fn error(&self) -> Option<String> {
-        self.shared.error.lock().unwrap().clone()
+        self.shared.error_msg()
     }
 
-    fn pause(&self, now: f64) {
+    fn pause(&self, at: f64) {
         self.shared.with(|s| {
-            s.pause(now);
+            s.pause(at);
         });
     }
 
-    fn resume(&self, now: f64) {
+    fn resume(&self, at: f64) {
         self.shared.with(|s| {
-            s.resume(now);
+            s.resume(at);
         });
     }
 
     fn finish(mut self) -> Result<()> {
-        let end = secs(host_now());
+        let end = now();
+        #[cfg(target_os = "macos")]
         self.cam.stop();
+        // Linux: the camera thread ends when its handle drops, before the sink finishes.
+        #[cfg(not(target_os = "macos"))]
+        drop(self.cam);
         self.stop.store(true, Ordering::SeqCst);
         if let Some(p) = self.pacer.take() {
             let _ = p.join();
         }
-        let sink = self.shared.sink.lock().unwrap().take();
-        match sink {
-            Some(s) => objc2::rc::autoreleasepool(|_| s.finish(end)).map(|_| ()),
+        match self.shared.take_sink() {
+            Some(s) => pool(|| s.finish(end)).map(|_| ()),
             None => Ok(()),
         }
     }
@@ -162,7 +206,7 @@ pub struct Recorder {
     device: Option<CameraRec>,
     input: Option<InputLogger>,
     kind: SourceKind,
-    /// Captured region in global points at the start.
+    /// Captured region in global points at the start (Linux: stream pixels).
     bounds: Rect,
     /// Video pixels per point.
     scale: f64,
@@ -174,9 +218,39 @@ pub struct Recorder {
     app_name: Option<String>,
 }
 
+/// Host time in seconds, on the clock the capture and input logger stamp with.
+#[cfg(target_os = "macos")]
+fn now() -> f64 {
+    secs(host_now())
+}
+
+#[cfg(not(target_os = "macos"))]
+fn now() -> f64 {
+    crate::capture::types::clock_secs()
+}
+
+/// Runs `f` inside an Objective-C autorelease pool on macOS.
+#[cfg(target_os = "macos")]
+fn pool<T>(f: impl FnOnce() -> T) -> T {
+    objc2::rc::autoreleasepool(|_| f())
+}
+
+#[cfg(not(target_os = "macos"))]
+fn pool<T>(f: impl FnOnce() -> T) -> T {
+    f()
+}
+
+#[cfg(target_os = "macos")]
 fn display_bounds(id: u32) -> Rect {
     let r = unsafe { input::CGDisplayBounds(id) };
     Rect::new(r.origin.x, r.origin.y, r.size.width, r.size.height)
+}
+
+#[cfg(not(target_os = "macos"))]
+fn warn_mac_only(o: &Options) {
+    if o.hide_desktop_icons || o.hide_dock {
+        eprintln!("glide: hiding desktop icons and the Dock is macOS only; ignoring");
+    }
 }
 
 /// VideoToolbox quality for screen recordings (see `Quality::encoder_quality`).
@@ -188,6 +262,8 @@ fn even(v: f64) -> usize {
 
 impl Recorder {
     pub fn start(opts: Options) -> Result<Self> {
+        #[cfg(not(target_os = "macos"))]
+        warn_mac_only(&opts);
         let stamp = crate::util::timestamp_name();
         std::fs::create_dir_all(&opts.dir).with_context(|| format!("creating {}", opts.dir.display()))?;
         let path = match &opts.name {
@@ -198,12 +274,19 @@ impl Recorder {
 
         // Resolve the target: what to capture, at what size, where it is.
         let (cap_target, kind, bounds, size, window, app_name) = match &opts.target {
+            #[cfg(target_os = "macos")]
             Target::Pattern => (None, SourceKind::Display, Rect::new(0.0, 0.0, 1440.0, 900.0), (2880, 1800), None, None),
+            #[cfg(not(target_os = "macos"))]
+            Target::Pattern => (None, SourceKind::Display, Rect::new(0.0, 0.0, 2880.0, 1800.0), (2880, 1800), None, None),
+            #[cfg(target_os = "macos")]
             Target::Device { id } => {
                 let (w, h) = crate::capture::camera::ios_dimensions(id).context("iPhone/iPad not found — connect it with a cable and unlock it")?;
                 let px = (even(w as f64), even(h as f64));
                 (None, SourceKind::Device, Rect::new(0.0, 0.0, px.0 as f64, px.1 as f64), px, None, None)
             }
+            #[cfg(not(target_os = "macos"))]
+            Target::Device { .. } => bail!("iPhone and iPad sources need macOS"),
+            #[cfg(target_os = "macos")]
             Target::Display { id } => {
                 let ds = screen::displays()?;
                 let d = ds.into_iter().find(|d| d.id == *id || *id == 0).context("display not found")?;
@@ -211,6 +294,15 @@ impl Recorder {
                 let px = (even(d.pixels.0 as f64), even(d.pixels.1 as f64));
                 (Some(screen::Target::Display(d, None)), SourceKind::Display, b, px, None, None)
             }
+            #[cfg(not(target_os = "macos"))]
+            Target::Display { id } => {
+                let ds = screen::displays()?;
+                let d = ds.into_iter().find(|d| d.id == *id || *id == 0).context("display not found")?;
+                let px = (even(d.pixels.0 as f64), even(d.pixels.1 as f64));
+                let b = Rect::new(0.0, 0.0, px.0 as f64, px.1 as f64);
+                (Some(screen::Target::Display(d, None)), SourceKind::Display, b, px, None, None)
+            }
+            #[cfg(target_os = "macos")]
             Target::Area { display, rect } => {
                 let ds = screen::displays()?;
                 let d = ds.into_iter().find(|d| d.id == *display || *display == 0).context("display not found")?;
@@ -227,6 +319,20 @@ impl Recorder {
                 let global = rect.translate(db.min());
                 (Some(screen::Target::Display(d, Some(cg))), SourceKind::Area, global, px, None, None)
             }
+            #[cfg(not(target_os = "macos"))]
+            Target::Area { display, rect } => {
+                let ds = screen::displays()?;
+                let d = ds.into_iter().find(|d| d.id == *display || *display == 0).context("display not found")?;
+                // Keep the area on the display (a saved area may be from a bigger one).
+                let rect = &rect.intersect(&Rect::new(0.0, 0.0, d.points.0 as f64, d.points.1 as f64));
+                anyhow::ensure!(rect.w >= 8.0 && rect.h >= 8.0, "the selected area is outside this display");
+                let scale = d.pixels.0 as f64 / d.points.0 as f64;
+                let px = (even(rect.w * scale), even(rect.h * scale));
+                let b = Rect::new(0.0, 0.0, px.0 as f64, px.1 as f64);
+                let area = [rect.x, rect.y, rect.w, rect.h];
+                (Some(screen::Target::Display(d, Some(area))), SourceKind::Area, b, px, None, None)
+            }
+            #[cfg(target_os = "macos")]
             Target::Window { id } => {
                 let w = screen::find_window(&id.to_string())?;
                 let b = input::window_bounds(*id).unwrap_or(Rect::new(0.0, 0.0, w.size.0, w.size.1));
@@ -239,10 +345,22 @@ impl Recorder {
                 let app = Some(w.app.clone());
                 (Some(screen::Target::Window(w)), SourceKind::Window, b, px, Some(*id), app)
             }
+            #[cfg(not(target_os = "macos"))]
+            Target::Window { id } => {
+                let w = screen::windows()?.into_iter().find(|w| w.id == *id).context("window not found")?;
+                // Window sizes are in points and Linux windows carry no display, so use the first display's ratio.
+                let ds = screen::displays()?;
+                let scale = ds.first().map_or(1.0, |d| d.pixels.0 as f64 / d.points.0 as f64);
+                let px = (even(w.size.0 * scale), even(w.size.1 * scale));
+                let b = Rect::new(0.0, 0.0, px.0 as f64, px.1 as f64);
+                let app = Some(w.app.clone());
+                (Some(screen::Target::Window(w)), SourceKind::Window, b, px, Some(*id), app)
+            }
         };
         let scale = size.0 as f64 / bounds.w.max(1.0);
         // Only now (the target resolved) create the package folder.
         std::fs::create_dir_all(package.recording_dir())?;
+        #[cfg(target_os = "macos")]
         if let Target::Device { id } = &opts.target {
             let device = CameraRec::start_ios(id, &package.rec("screen.mov"), size).inspect_err(|_| {
                 let _ = std::fs::remove_dir_all(&package.root);
@@ -278,30 +396,49 @@ impl Recorder {
             mic: opts.mic.clone(),
             webcam: None,
             pip: PipSpec { size: 0.2, corner: Corner::BottomRight, shape: Shape::Rounded, mirror: false },
+            // Linux: the cursor arrives as portal metadata, which the input logger samples.
+            #[cfg(target_os = "macos")]
             cursor: false,
+            #[cfg(not(target_os = "macos"))]
+            cursor: true,
             clicks: false,
             duration: None,
             quiet: true,
             test_pattern: matches!(opts.target, Target::Pattern).then_some(false),
             audio_layout: AudioLayout::Stems,
             gains_db: [0.0, 0.0],
-            mic_backend: MicBackend::Sck,
             scene: CapScene::Screen,
+            #[cfg(target_os = "macos")]
+            mic_backend: MicBackend::Sck,
+            #[cfg(target_os = "macos")]
             hide_desktop_icons: opts.hide_desktop_icons,
+            #[cfg(target_os = "macos")]
             hide_dock: opts.hide_dock,
+            #[cfg(target_os = "macos")]
             exclude_own_audio: opts.exclude_own_audio,
         };
         if let Err(e) = crate::capture::record::check_permissions(&cap) {
             let _ = std::fs::remove_dir_all(&package.root);
             anyhow::bail!("{e}");
         }
+        #[cfg(target_os = "macos")]
         let input = InputLogger::start(package.rec("cursors"), window, opts.keys);
         let session = match Session::start(&cap, cap_target, true, None) {
             Ok(s) => s,
             Err(e) => {
+                #[cfg(target_os = "macos")]
                 input.stop();
                 let _ = std::fs::remove_dir_all(&package.root);
                 return Err(e);
+            }
+        };
+        #[cfg(not(target_os = "macos"))]
+        let input = match InputLogger::start(package.rec("cursors"), session.cursor_source(), || None, opts.keys) {
+            Ok(i) => i,
+            Err(e) => {
+                let _ = session.finish();
+                let _ = std::fs::remove_dir_all(&package.root);
+                return Err(e.context("starting input logging"));
             }
         };
         let camera = match &opts.camera {
@@ -336,28 +473,28 @@ impl Recorder {
         self.pauses.last().is_some_and(|p| p.1.is_none())
     }
 
-    fn paused_secs(&self, now: f64) -> f64 {
-        self.pauses.iter().map(|&(a, b)| b.unwrap_or(now) - a).sum()
+    fn paused_secs(&self, at: f64) -> f64 {
+        self.pauses.iter().map(|&(a, b)| b.unwrap_or(at) - a).sum()
     }
 
     pub fn pause(&mut self) {
         if self.is_paused() || !self.has_frames() {
             return;
         }
-        let now = secs(host_now());
+        let at = now();
         let paused = match (&self.session, &self.device) {
             (Some(s), _) => s.pause(),
             (None, Some(d)) => {
-                d.pause(now);
+                d.pause(at);
                 true
             }
             _ => false,
         };
         if paused {
             if let Some(c) = &self.camera {
-                c.pause(now);
+                c.pause(at);
             }
-            self.pauses.push((now, None));
+            self.pauses.push((at, None));
         }
     }
 
@@ -365,32 +502,43 @@ impl Recorder {
         if !self.is_paused() {
             return;
         }
-        let now = secs(host_now());
+        let at = now();
         let resumed = match (&self.session, &self.device) {
             (Some(s), _) => s.resume(),
             (None, Some(d)) => {
-                d.resume(now);
+                d.resume(at);
                 true
             }
             _ => false,
         };
         if resumed {
             if let Some(c) = &self.camera {
-                c.resume(now);
+                c.resume(at);
             }
             if let Some(p) = self.pauses.last_mut() {
-                p.1 = Some(now);
+                p.1 = Some(at);
             }
         }
+    }
+
+    /// Session length so far. Linux stops on the clock: written frames trail it under encoder backpressure.
+    #[cfg(not(target_os = "macos"))]
+    fn session_elapsed(&self, s: &Session) -> f64 {
+        self.elapsed_with(s.t0_secs())
+    }
+
+    #[cfg(target_os = "macos")]
+    fn session_elapsed(&self, s: &Session) -> f64 {
+        s.recorded_secs()
     }
 
     /// Recorded seconds (excluding pauses).
     pub fn elapsed(&self) -> f64 {
         match (&self.session, &self.device) {
-            (Some(s), _) => s.recorded_secs(),
+            (Some(s), _) => self.session_elapsed(s),
             (None, Some(d)) => d.t0().map_or(0.0, |t0| {
-                let now = secs(host_now());
-                (now - t0 - self.paused_secs(now)).max(0.0)
+                let at = now();
+                (at - t0 - self.paused_secs(at)).max(0.0)
             }),
             _ => 0.0,
         }
@@ -436,8 +584,8 @@ impl Recorder {
 
     fn elapsed_with(&self, t0: Option<f64>) -> f64 {
         t0.map_or(0.0, |t0| {
-            let now = secs(host_now());
-            (now - t0 - self.paused_secs(now)).max(0.0)
+            let at = now();
+            (at - t0 - self.paused_secs(at)).max(0.0)
         })
     }
 
@@ -480,8 +628,12 @@ impl Recorder {
         }
         let session = self.session.take().expect("session");
         let t0 = session.t0_secs();
+        // Linux: the pacer may still owe frames at stop, so the length is final only after finish.
+        #[cfg(target_os = "macos")]
         let duration_ms = session.recorded_secs() * 1000.0;
         let stats = session.finish();
+        #[cfg(not(target_os = "macos"))]
+        let duration_ms = stats.as_ref().map_or(0.0, |s| s.output_secs * 1000.0);
         let Some(t0) = t0 else {
             let _ = std::fs::remove_dir_all(&self.package.root);
             bail!("no frames were captured (is Screen Recording permission granted?)");

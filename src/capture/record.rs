@@ -35,6 +35,17 @@ impl Shared {
         }
         self.stop.store(true, Ordering::SeqCst);
     }
+
+    /// A shared handle around `sink`; `stop` ends the session when set.
+    pub fn new_sink(sink: Sink, stop: Arc<AtomicBool>) -> Arc<Shared> {
+        Arc::new(Shared { sink: Mutex::new(Some(sink)), error: Mutex::new(None), stop })
+    }
+    pub fn take_sink(&self) -> Option<Sink> {
+        self.sink.lock().unwrap().take()
+    }
+    pub fn error_msg(&self) -> Option<String> {
+        self.error.lock().unwrap().clone()
+    }
 }
 
 /// Set by SIGINT/SIGTERM/SIGHUP in CLI mode.

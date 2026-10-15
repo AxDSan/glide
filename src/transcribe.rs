@@ -7,22 +7,36 @@
 //! ~55 s at the quietest point near each boundary, because URL recognition
 //! requests are limited in length.
 
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
+#[cfg(target_os = "macos")]
+use std::path::Path;
+#[cfg(target_os = "macos")]
 use std::sync::mpsc;
+#[cfg(target_os = "macos")]
 use std::time::Duration;
 
-use anyhow::{Context, Result, anyhow, bail};
+use anyhow::{Result, anyhow, bail};
+#[cfg(target_os = "macos")]
+use anyhow::Context;
+#[cfg(target_os = "macos")]
 use block2::RcBlock;
+#[cfg(target_os = "macos")]
 use objc2::rc::{Allocated, Retained};
+#[cfg(target_os = "macos")]
 use objc2::runtime::{AnyClass, AnyObject, Bool};
+#[cfg(target_os = "macos")]
 use objc2::msg_send;
+#[cfg(target_os = "macos")]
 use objc2_foundation::{NSArray, NSBundle, NSError, NSLocale, NSOperationQueue, NSString, NSURL};
 
 use crate::capture::mixer;
+#[cfg(target_os = "macos")]
 use crate::project::recording::Word;
 use crate::project::{Package, write_json};
+#[cfg(target_os = "macos")]
 use crate::util::ns;
 
+#[cfg(target_os = "macos")]
 #[link(name = "Speech", kind = "framework")]
 unsafe extern "C" {}
 
@@ -62,7 +76,10 @@ pub fn transcribe_package(pkg: &Package, engine: Engine, progress: &std::sync::A
     let stereo = crate::media::read_audio(&pkg.rec(&mic.file), mic.track)?;
     let mono = downsample(&stereo);
     let words = match engine {
+        #[cfg(target_os = "macos")]
         Engine::Apple => transcribe_samples(&mono)?,
+        #[cfg(not(target_os = "macos"))]
+        Engine::Apple => bail!("Apple Speech is only available on macOS; pick a Whisper model"),
         Engine::Whisper(model) => crate::whisper::transcribe(&mono, model, progress)?,
     };
     write_json(&pkg.rec("transcript.json"), &words)?;
@@ -104,6 +121,7 @@ pub fn split_points(samples: &[f32]) -> Vec<usize> {
     cuts
 }
 
+#[cfg(target_os = "macos")]
 /// Recognise 16 kHz mono samples; word times are in ms from sample 0.
 pub fn transcribe_samples(samples: &[f32]) -> Result<Vec<Word>> {
     if samples.iter().all(|s| s.abs() < 1e-4) {
@@ -137,6 +155,7 @@ pub fn transcribe_samples(samples: &[f32]) -> Result<Vec<Word>> {
     Ok(words)
 }
 
+#[cfg(target_os = "macos")]
 fn write_wav(path: &Path, samples: &[f32]) -> Result<()> {
     let data_len = (samples.len() * 2) as u32;
     let mut b = Vec::with_capacity(44 + data_len as usize);
@@ -158,10 +177,12 @@ fn write_wav(path: &Path, samples: &[f32]) -> Result<()> {
     std::fs::write(path, b).with_context(|| format!("writing {}", path.display()))
 }
 
+#[cfg(target_os = "macos")]
 fn class(name: &str) -> Result<&'static AnyClass> {
     AnyClass::get(&std::ffi::CString::new(name).unwrap()).ok_or_else(|| anyhow!("{name} is unavailable"))
 }
 
+#[cfg(target_os = "macos")]
 /// Speech recognition permission. Requesting it from a process without an
 /// `NSSpeechRecognitionUsageDescription` would abort, so only the bundled app asks.
 fn authorize() -> Result<()> {
@@ -194,6 +215,7 @@ fn authorize() -> Result<()> {
     }
 }
 
+#[cfg(target_os = "macos")]
 fn recognize_file(path: &Path) -> Result<Vec<Word>> {
     let rec_cls = class("SFSpeechRecognizer")?;
     let req_cls = class("SFSpeechURLRecognitionRequest")?;

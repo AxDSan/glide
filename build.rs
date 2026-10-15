@@ -3,5 +3,7 @@ fn main() {
     // bundle identifier even when the binary runs outside the .app bundle.
     let plist = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("support/Info.plist");
     println!("cargo:rerun-if-changed={}", plist.display());
-    println!("cargo:rustc-link-arg-bins=-Wl,-sectcreate,__TEXT,__info_plist,{}", plist.display());
+    if std::env::var("CARGO_CFG_TARGET_OS").as_deref() == Ok("macos") {
+        println!("cargo:rustc-link-arg-bins=-Wl,-sectcreate,__TEXT,__info_plist,{}", plist.display());
+    }
 }

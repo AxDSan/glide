@@ -15,7 +15,7 @@ use objc2_core_media::*;
 use crate::util::*;
 use crate::capture::writer::AudioKind;
 
-pub const RATE: f64 = 48000.0;
+pub use super::types::RATE;
 /// Emit even if a source is silent/stalled for longer than this.
 const MAX_WAIT: i64 = 24000; // 0.5 s
 /// Treat timestamp jumps up to this many samples as continuous.

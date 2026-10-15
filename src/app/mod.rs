@@ -6,16 +6,21 @@
 pub mod editor;
 pub mod maskwatch;
 pub mod home;
+#[cfg_attr(target_os = "linux", path = "hotkey_linux.rs")]
 pub mod hotkey;
 pub mod inspector;
+#[cfg_attr(target_os = "linux", path = "macos_linux.rs")]
 pub mod macos;
+#[cfg_attr(target_os = "linux", path = "menubar_linux.rs")]
 pub mod menubar;
 pub mod player;
 pub mod preview;
 pub mod snapshot;
 pub mod theme;
 pub mod timeline;
+#[cfg_attr(target_os = "linux", path = "voiceover_linux.rs")]
 pub mod voiceover;
+#[cfg(target_os = "macos")]
 pub mod recbar;
 pub mod widgets;
 pub mod winpick;
@@ -164,7 +169,7 @@ impl<K: Clone + PartialEq + Send + 'static, V: Send + 'static> Slot<K, V> {
             let (tx, rx) = std::sync::mpsc::channel();
             let key = k.clone();
             std::thread::spawn(move || {
-                let _ = tx.send(objc2::rc::autoreleasepool(|_| start(&key)));
+                let _ = tx.send(crate::util::autoreleasepool(|| start(&key)));
                 wake();
             });
             self.starting = Some((k, rx));
@@ -192,14 +197,20 @@ struct Live {
     camera: Slot<livecap::Source, livecap::LivePreview>,
     /// Microphone name (None = default input).
     mic: Slot<Option<String>, crate::capture::meter::MicMeter>,
-    /// The screen preview: a native texture over the newest frame's
-    /// IOSurface (no copies) and its size in pixels.
+    /// The screen preview: its texture and size in pixels (on macOS a native
+    /// texture over the newest frame's IOSurface, no copies).
     tex: Option<(egui::TextureId, [u32; 2])>,
     /// Frames whose IOSurfaces back textures that may still be drawn.
+    #[cfg(target_os = "macos")]
     frames: std::collections::VecDeque<crate::render::interop::Wrapped>,
+    #[cfg(target_os = "macos")]
     interop: Option<crate::render::interop::TextureCache>,
     /// The registered native texture, reused across sources.
+    #[cfg(target_os = "macos")]
     tex_id: Option<egui::TextureId>,
+    /// Linux: the screen preview's CPU-uploaded texture (kept alive here).
+    #[cfg(not(target_os = "macos"))]
+    screen_tex: Option<egui::TextureHandle>,
     cam_tex: Option<egui::TextureHandle>,
     /// Displayed levels (peak hold with decay).
     levels: [f32; 2],
@@ -290,9 +301,11 @@ fn plog(msg: &str) {
 struct App {
     gpu: Option<Gpu>,
     main: Option<Win>,
-    /// Floating recording controls (while recording).
+    /// Floating recording controls (while recording; macOS).
+    #[cfg(target_os = "macos")]
     bar: Option<recbar::RecordBar>,
     /// Where the user last left the bar (screen points, bottom-left).
+    #[cfg(target_os = "macos")]
     bar_origin: Option<objc2_core_foundation::CGPoint>,
     /// Picker overlays, one per display.
     overlays: Vec<Win>,
@@ -318,10 +331,26 @@ struct App {
     playtest: Option<PlayTest>,
 }
 
+/// Selftest screenshot of one of our windows; false if it couldn't be taken.
+#[cfg(target_os = "macos")]
+fn screenshot(window: &Window, out: &std::path::Path) -> bool {
+    let Some(num) = macos::window_number(window) else { return false };
+    std::process::Command::new("screencapture").args(["-x", "-o", "-l", &num.to_string()]).arg(out).status().is_ok_and(|s| s.success())
+}
+
+/// Linux: spectacle captures the active window (the selftest window is focused when shot).
+#[cfg(not(target_os = "macos"))]
+fn screenshot(_window: &Window, out: &std::path::Path) -> bool {
+    std::process::Command::new("spectacle").args(["-b", "-n", "-a", "-o"]).arg(out).status().is_ok_and(|s| s.success())
+}
+
 fn permission_note() -> Option<String> {
-    use crate::capture::tcc::{self, Status};
-    if tcc::screen_status() != Status::Granted {
-        return Some("Glide needs Screen Recording access. Request it, then enable Glide in System Settings › Privacy & Security › Screen & System Audio Recording, and reopen Glide.".into());
+    #[cfg(target_os = "macos")]
+    {
+        use crate::capture::tcc::{self, Status};
+        if tcc::screen_status() != Status::Granted {
+            return Some("Glide needs Screen Recording access. Request it, then enable Glide in System Settings › Privacy & Security › Screen & System Audio Recording, and reopen Glide.".into());
+        }
     }
     None
 }
@@ -352,7 +381,9 @@ impl App {
         App {
             gpu: None,
             main: None,
+            #[cfg(target_os = "macos")]
             bar: None,
+            #[cfg(target_os = "macos")]
             bar_origin: None,
             overlays: vec![],
             area: AreaPick::default(),
@@ -377,28 +408,42 @@ impl App {
     }
 
     fn open_window(&mut self, el: &ActiveEventLoop, title: &str, size: (f64, f64), min: (f64, f64)) -> Win {
+        #[cfg(target_os = "macos")]
         use winit::platform::macos::WindowAttributesExtMacOS;
+        #[cfg(target_os = "linux")]
+        use winit::platform::wayland::WindowAttributesExtWayland;
         let attrs = Window::default_attributes()
             .with_title(title)
             .with_inner_size(winit::dpi::LogicalSize::new(size.0, size.1))
-            .with_min_inner_size(winit::dpi::LogicalSize::new(min.0, min.1))
-            .with_titlebar_transparent(true)
-            .with_fullsize_content_view(true)
-            .with_title_hidden(true);
+            .with_min_inner_size(winit::dpi::LogicalSize::new(min.0, min.1));
+        // Linux: the Wayland app_id matches glide.desktop so the taskbar shows its icon.
+        #[cfg(target_os = "linux")]
+        let attrs = attrs.with_name("glide", "");
+        // macOS: transparent title bar with the traffic lights inset into the toolbar.
+        #[cfg(target_os = "macos")]
+        let attrs = attrs.with_titlebar_transparent(true).with_fullsize_content_view(true).with_title_hidden(true);
         self.make_window(el, attrs, false)
     }
 
     /// Borderless transparent window covering a display (area picker).
     fn open_overlay(&mut self, el: &ActiveEventLoop, display: u32) -> Win {
+        #[cfg(target_os = "macos")]
         let (id, x, y, w, h) = macos::display_frame(display);
-        let attrs = Window::default_attributes()
+        #[cfg(not(target_os = "macos"))]
+        let (id, ..) = macos::display_frame(display);
+        let base = Window::default_attributes()
             .with_title("Select Area")
             .with_decorations(false)
             .with_transparent(true)
             .with_resizable(false)
-            .with_position(winit::dpi::LogicalPosition::new(x, y))
-            .with_inner_size(winit::dpi::LogicalSize::new(w, h))
             .with_window_level(WindowLevel::AlwaysOnTop);
+        // Wayland doesn't let clients place windows: the overlay covers its display fullscreen.
+        #[cfg(target_os = "macos")]
+        let attrs = base
+            .with_position(winit::dpi::LogicalPosition::new(x, y))
+            .with_inner_size(winit::dpi::LogicalSize::new(w, h));
+        #[cfg(not(target_os = "macos"))]
+        let attrs = base.with_fullscreen(Some(winit::window::Fullscreen::Borderless(macos::monitor_for_display(el, id))));
         let mut win = self.make_window(el, attrs, true);
         win.display = id;
         win
@@ -494,8 +539,14 @@ impl App {
         }
         if let Some(w) = &self.main {
             w.window.set_visible(true);
+            w.window.set_minimized(false);
             w.window.focus_window();
             w.window.request_redraw();
+        }
+        // winit can't raise a Wayland window (focus_window is a no-op), so KWin does it.
+        #[cfg(target_os = "linux")]
+        if let Err(e) = crate::capture::kwin::raise_own() {
+            eprintln!("glide: couldn't bring the window forward: {e:#}");
         }
         if !self.scripted() {
             macos::activate();
@@ -544,24 +595,26 @@ impl App {
         // GLIDE_SELFTEST_REAL records the main display (to check what ends up
         // in a real recording, e.g. that the control bar doesn't).
         if self.selftest.is_some() && std::env::var_os("GLIDE_SELFTEST_REAL").is_some() {
-            return recorder::Options { target: Target::Display { id: 0 }, system_audio: false, mic: None, camera: None, fps: 60, keys: false, dir: s.dir(), name: Some("Selftest".into()), ..Default::default() };
+            return recorder::Options { target: Target::Display { id: macos::main_display() }, system_audio: false, mic: None, camera: None, fps: 60, keys: false, dir: s.dir(), name: Some("Selftest".into()), ..Default::default() };
         }
         if self.selftest.is_some() {
             return recorder::Options { target: Target::Pattern, system_audio: false, mic: None, camera: None, fps: 60, keys: false, dir: s.dir(), name: Some("Selftest".into()), ..Default::default() };
         }
+        // Display 0 means the main display.
+        let display = if s.display == 0 { macos::main_display() } else { s.display };
         let target = match s.source {
-            SourceKind::Display => Target::Display { id: s.display },
+            SourceKind::Display => Target::Display { id: display },
             SourceKind::Window => match s.window {
                 Some(id) => Target::Window { id },
-                None => Target::Display { id: s.display },
+                None => Target::Display { id: display },
             },
             SourceKind::Area => Target::Area {
-                display: s.display,
+                display,
                 rect: crate::engine::geom::Rect::new(s.area[0], s.area[1], s.area[2], s.area[3]),
             },
             SourceKind::Device => match &s.ios_device {
                 Some(id) => Target::Device { id: id.clone() },
-                None => Target::Display { id: s.display },
+                None => Target::Display { id: display },
             },
         };
         recorder::Options {
@@ -594,16 +647,13 @@ impl App {
         let countdown = self.settings.countdown.then(|| Instant::now() + Duration::from_secs(3));
         self.recording = Some(Recording { rec: None, countdown_until: countdown });
         if let Some(w) = &self.main {
+            // Linux: minimize so the window can be restored from the tray or taskbar.
+            #[cfg(target_os = "macos")]
             w.window.set_visible(false);
+            #[cfg(not(target_os = "macos"))]
+            w.window.set_minimized(true);
         }
-        if self.bar.is_none()
-            && let Some(mtm) = objc2::MainThreadMarker::new()
-        {
-            let hk = &self.settings.hotkeys;
-            let display = if matches!(self.settings.source, SourceKind::Display | SourceKind::Area) { self.settings.display } else { 0 };
-            let pause = hk.pause.map(|c| c.label()).unwrap_or_default();
-            self.bar = Some(recbar::RecordBar::new(mtm, display, self.bar_origin, &hk.record_label(), &pause));
-        }
+        self.show_bar();
         if countdown.is_none() {
             self.begin_capture();
         }
@@ -640,7 +690,7 @@ impl App {
         std::thread::spawn(move || {
             // Always report back, even if finalising panics, so the UI can't
             // stay on "Saving…" forever.
-            let res = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| objc2::rc::autoreleasepool(|_| r.stop())))
+            let res = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| crate::util::autoreleasepool(|| r.stop())))
                 .unwrap_or_else(|_| Err(anyhow::anyhow!("saving the recording crashed")))
                 .map_err(|e| format!("{e:#}"));
             *done.lock().unwrap() = Some(res);
@@ -654,9 +704,9 @@ impl App {
         let Some(rec) = self.recording.take() else { return };
         if let Some(r) = rec.rec {
             if restarting {
-                objc2::rc::autoreleasepool(|_| r.cancel());
+                crate::util::autoreleasepool(|| r.cancel());
             } else {
-                std::thread::spawn(move || objc2::rc::autoreleasepool(|_| r.cancel()));
+                std::thread::spawn(move || crate::util::autoreleasepool(|| r.cancel()));
             }
         }
         // Restarting keeps the recording bar up for the new take.
@@ -666,12 +716,57 @@ impl App {
         }
     }
 
+    /// Put up the floating recording controls (macOS; Linux relies on the tray and hotkeys).
+    #[cfg(target_os = "macos")]
+    fn show_bar(&mut self) {
+        if self.bar.is_none()
+            && let Some(mtm) = objc2::MainThreadMarker::new()
+        {
+            let hk = &self.settings.hotkeys;
+            let display = if matches!(self.settings.source, SourceKind::Display | SourceKind::Area) { self.settings.display } else { 0 };
+            let pause = hk.pause.map(|c| c.label()).unwrap_or_default();
+            self.bar = Some(recbar::RecordBar::new(mtm, display, self.bar_origin, &hk.record_label(), &pause));
+        }
+    }
+
+    #[cfg(not(target_os = "macos"))]
+    fn show_bar(&mut self) {}
+
+    /// The recording bar's window number and draggability, while it's up.
+    #[cfg(target_os = "macos")]
+    fn bar_state(&self) -> Option<(isize, bool)> {
+        self.bar.as_ref().map(|b| (b.window_number(), b.draggable()))
+    }
+
+    #[cfg(not(target_os = "macos"))]
+    fn bar_state(&self) -> Option<(isize, bool)> {
+        None
+    }
+
+    /// Refresh the recording bar's state.
+    #[cfg(target_os = "macos")]
+    fn update_bar(&mut self, clock: &str, paused: bool) {
+        if let Some(b) = &mut self.bar {
+            b.update(match &self.recording {
+                Some(Recording { rec: None, countdown_until: Some(t) }) => recbar::State::Countdown(t.saturating_duration_since(Instant::now()).as_secs() + 1),
+                _ => recbar::State::Recording { clock: clock.to_string(), paused },
+            });
+        }
+    }
+
+    #[cfg(not(target_os = "macos"))]
+    fn update_bar(&mut self, _clock: &str, _paused: bool) {}
+
     /// Remove the recording bar, remembering where it was.
+    #[cfg(target_os = "macos")]
     fn close_bar(&mut self) {
         if let Some(b) = self.bar.take() {
             self.bar_origin = Some(b.origin());
         }
     }
+
+    #[cfg(not(target_os = "macos"))]
+    fn close_bar(&mut self) {}
 
     fn handle(&mut self, el: &ActiveEventLoop, c: Cmd) {
         match c {
@@ -798,12 +893,7 @@ impl App {
             _ => String::new(),
         };
         let paused = matches!(&self.recording, Some(Recording { rec: Some(r), .. }) if r.is_paused());
-        if let Some(b) = &mut self.bar {
-            b.update(match &self.recording {
-                Some(Recording { rec: None, countdown_until: Some(t) }) => recbar::State::Countdown(t.saturating_duration_since(Instant::now()).as_secs() + 1),
-                _ => recbar::State::Recording { clock: clock.clone(), paused },
-            });
-        }
+        self.update_bar(&clock, paused);
         if let Some(m) = &mut self.menubar {
             m.update(&menubar::View { recording: self.recording.is_some(), paused, finishing: self.finishing, clock: &clock });
         }
@@ -968,6 +1058,7 @@ impl App {
     }
 
     fn selftest_step(&mut self, el: &ActiveEventLoop) {
+        let bar = self.bar_state();
         let Some(st) = &mut self.selftest else { return };
         let since = st.at.elapsed();
         let fail = |msg: String| {
@@ -1006,9 +1097,9 @@ impl App {
                 };
                 let size = w.window.inner_size();
                 log(&format!("area picker open {}x{} px, {} displays covered", size.width, size.height, self.overlays.len()));
-                if let (Some(dir), Some(num)) = (std::env::var_os("GLIDE_SELFTEST_SHOTS"), macos::window_number(&w.window)) {
+                if let Some(dir) = std::env::var_os("GLIDE_SELFTEST_SHOTS") {
                     let out = PathBuf::from(dir).join("area-picker.png");
-                    let ok = std::process::Command::new("screencapture").args(["-x", "-o", "-l", &num.to_string()]).arg(&out).status().is_ok_and(|s| s.success());
+                    let ok = screenshot(&w.window, &out);
                     log(&format!("area picker screenshot {} ok={ok}", out.display()));
                 }
                 st.phase = 11;
@@ -1043,9 +1134,8 @@ impl App {
                 log(&format!("window picker open on {} displays with {} windows, selected {:?}", self.overlays.len(), wm.list.len(), wm.selected));
                 if let Some(dir) = std::env::var_os("GLIDE_SELFTEST_SHOTS") {
                     for o in &self.overlays {
-                        let Some(num) = macos::window_number(&o.window) else { continue };
                         let out = PathBuf::from(&dir).join(format!("window-picker-{}.png", o.display));
-                        let ok = std::process::Command::new("screencapture").args(["-x", "-o", "-l", &num.to_string()]).arg(&out).status().is_ok_and(|s| s.success());
+                        let ok = screenshot(&o.window, &out);
                         log(&format!("window picker screenshot {} ok={ok}", out.display()));
                     }
                 }
@@ -1086,15 +1176,13 @@ impl App {
                     }
                     if st.resumed && r.elapsed() >= 3.0 {
                         let live = self.live.screen.active() || self.live.camera.active() || self.live.mic.active();
-                        let bar = self.bar.as_ref().map(|b| (b.window_number(), b.draggable()));
-                        let at = self.bar.as_ref().map(|b| (b.origin().x.round(), b.origin().y.round()));
-                        log(&format!("recording bar={bar:?} origin={at:?} elapsed={:.1}s live_preview_running={live}", r.elapsed()));
+                        log(&format!("recording bar={bar:?} elapsed={:.1}s live_preview_running={live}", r.elapsed()));
                         if let (Some(dir), Some((num, _))) = (std::env::var_os("GLIDE_SELFTEST_SHOTS"), bar) {
                             let out = PathBuf::from(dir).join("record-bar.png");
                             let ok = std::process::Command::new("screencapture").args(["-x", "-l", &num.to_string()]).arg(&out).status().is_ok_and(|s| s.success());
                             log(&format!("recording bar screenshot {} ok={ok}", out.display()));
                         }
-                        if bar.is_none_or(|(_, draggable)| !draggable) {
+                        if cfg!(target_os = "macos") && bar.is_none_or(|(_, draggable)| !draggable) {
                             fail("recording bar missing or not draggable".into());
                         }
                         if live {
@@ -1282,7 +1370,15 @@ impl App {
         }
         match s.source {
             SourceKind::Display => Some(livecap::Source::Display { id: s.display }),
-            SourceKind::Area if s.area[2] >= 8.0 && s.area[3] >= 8.0 => Some(livecap::Source::Area { display: s.display, rect: s.area }),
+            SourceKind::Area => {
+                // A saved area may be from a bigger display; keep it on this one, as the recorder does.
+                let (_, _, _, dw, dh) = macos::display_frame(s.display);
+                let x = s.area[0].max(0.0);
+                let y = s.area[1].max(0.0);
+                let w = s.area[2].min(dw - x);
+                let h = s.area[3].min(dh - y);
+                (w >= 8.0 && h >= 8.0).then(|| livecap::Source::Area { display: s.display, rect: [x, y, w, h] })
+            }
             SourceKind::Window => s.window.map(|id| livecap::Source::Window { id }),
             _ => None,
         }
@@ -1306,6 +1402,10 @@ impl App {
         // Screens at native resolution, scaled to the canvas (30 fps, as Rec).
         if live.screen.update(screen, "live preview", |(src, audio)| livecap::LivePreview::start(src, 0, 30, *audio, wake).map_err(|e| format!("{e:#}"))) {
             live.tex = None;
+            #[cfg(not(target_os = "macos"))]
+            {
+                live.screen_tex = None;
+            }
         }
         if live.camera.update(camera, "camera preview", |src| livecap::LivePreview::start(src, 720, 30, false, wake).map_err(|e| format!("{e:#}"))) {
             live.cam_tex = None;
@@ -1317,33 +1417,53 @@ impl App {
     /// and what the start view should show.
     fn live_view(&mut self, ctx: &egui::Context, renderer: &mut egui_wgpu::Renderer) -> home::LiveView {
         let live = &mut self.live;
-        if let (Some((_, p)), Some(gpu)) = (&live.screen.running, &self.gpu) {
-            // Scaled to the canvas the start view last laid out, in pixels.
-            let [w, h] = home::canvas_px();
-            p.set_target(w, h);
-            if live.interop.is_none() {
-                live.interop = crate::render::interop::TextureCache::new(&gpu.device);
-            }
-            if let (Some(pb), Some(cache)) = (p.take_buffer(), &live.interop)
-                && let Some(f) = cache.wrap(&pb, wgpu::TextureUsages::TEXTURE_BINDING)
-            {
-                // Drawn pixel-aligned at its own size: nearest is exact, and
-                // avoids a blur while the canvas is mid-resize (as Rec).
-                let filter = wgpu::FilterMode::Nearest;
-                let id = match live.tex_id {
-                    Some(id) => {
-                        renderer.update_egui_texture_from_wgpu_texture(&gpu.device, &f.view, filter, id);
-                        id
-                    }
-                    None => renderer.register_native_texture(&gpu.device, &f.view, filter),
-                };
-                live.tex_id = Some(id);
-                live.tex = Some((id, [f.size.0, f.size.1]));
-                live.frames.push_back(f);
-                while live.frames.len() > 3 {
-                    live.frames.pop_front();
+        #[cfg(target_os = "macos")]
+        {
+            if let (Some((_, p)), Some(gpu)) = (&live.screen.running, &self.gpu) {
+                // Scaled to the canvas the start view last laid out, in pixels.
+                let [w, h] = home::canvas_px();
+                p.set_target(w, h);
+                if live.interop.is_none() {
+                    live.interop = crate::render::interop::TextureCache::new(&gpu.device);
                 }
-                cache.flush();
+                if let (Some(pb), Some(cache)) = (p.take_buffer(), &live.interop)
+                    && let Some(f) = cache.wrap(&pb, wgpu::TextureUsages::TEXTURE_BINDING)
+                {
+                    // Drawn pixel-aligned at its own size: nearest is exact, and
+                    // avoids a blur while the canvas is mid-resize (as Rec).
+                    let filter = wgpu::FilterMode::Nearest;
+                    let id = match live.tex_id {
+                        Some(id) => {
+                            renderer.update_egui_texture_from_wgpu_texture(&gpu.device, &f.view, filter, id);
+                            id
+                        }
+                        None => renderer.register_native_texture(&gpu.device, &f.view, filter),
+                    };
+                    live.tex_id = Some(id);
+                    live.tex = Some((id, [f.size.0, f.size.1]));
+                    live.frames.push_back(f);
+                    while live.frames.len() > 3 {
+                        live.frames.pop_front();
+                    }
+                    cache.flush();
+                }
+            }
+        }
+        // Linux: frames arrive as CPU RGBA and are uploaded to an egui texture.
+        #[cfg(not(target_os = "macos"))]
+        {
+            let _ = renderer;
+            if let Some((_, p)) = &live.screen.running {
+                let [w, h] = home::canvas_px();
+                p.set_target(w, h);
+                if let Some(f) = p.take_frame() {
+                    let img = egui::ColorImage::from_rgba_unmultiplied([f.width as usize, f.height as usize], &f.rgba);
+                    match &mut live.screen_tex {
+                        Some(t) => t.set(img, egui::TextureOptions::NEAREST),
+                        None => live.screen_tex = Some(ctx.load_texture("screen preview", img, egui::TextureOptions::NEAREST)),
+                    }
+                    live.tex = live.screen_tex.as_ref().map(|t| (t.id(), t.size().map(|v| v as u32)));
+                }
             }
         }
         let upload = |slot: &mut Option<egui::TextureHandle>, p: &livecap::LivePreview, name: &str| {
@@ -1782,7 +1902,7 @@ impl App {
         let renderer = &mut win.renderer;
         // The overlay may close itself while drawing; remember that.
         let mut keep = true;
-        let out = ctx.run_ui(input, |ui| match which {
+        let mut out = ctx.run_ui(input, |ui| match which {
             Which::Main => self.draw_main(ui, renderer),
             Which::Overlay(display) => {
                 egui::CentralPanel::default().frame(egui::Frame::NONE).show(ui, |ui| {
@@ -1851,6 +1971,8 @@ impl App {
         for id in &out.textures_delta.free {
             win.renderer.free_texture(id);
         }
+        // Deltas are applied above; epaint asserts they are cleared before drop.
+        out.textures_delta.clear();
         if DRAG.swap(false, Ordering::Relaxed) {
             let _ = win.window.drag_window();
         }
@@ -1865,8 +1987,11 @@ impl ApplicationHandler for App {
         if self.menubar.is_some() {
             return;
         }
-        let mtm = objc2::MainThreadMarker::new().expect("main thread");
-        self.menubar = Some(menubar::MenuBar::new(mtm));
+        #[cfg(target_os = "macos")]
+        let tray = menubar::MenuBar::new(objc2::MainThreadMarker::new().expect("main thread"));
+        #[cfg(not(target_os = "macos"))]
+        let tray = menubar::MenuBar::new();
+        self.menubar = Some(tray);
         self.bind_hotkeys();
         self.show_main(el);
         if let Some(p) = self.open_at_launch.take() {
@@ -1949,7 +2074,7 @@ impl ApplicationHandler for App {
             ed.save();
         }
         if let Some(Recording { rec: Some(r), .. }) = self.recording.take() {
-            if let Err(e) = objc2::rc::autoreleasepool(|_| r.stop()) {
+            if let Err(e) = crate::util::autoreleasepool(|| r.stop()) {
                 eprintln!("glide: saving the recording on quit failed: {e:#}");
             }
         }
@@ -1994,6 +2119,13 @@ impl ApplicationHandler for App {
 
 /// Run the app (blocks until quit). `open` = a project to open at launch.
 pub fn run(open: Option<PathBuf>) -> Result<()> {
+    // A running Glide takes the project instead of a second window.
+    #[cfg(target_os = "linux")]
+    if let Some(p) = open.as_deref().and_then(|p| std::fs::canonicalize(p).ok())
+        && macos::forward_open(&p)
+    {
+        return Ok(());
+    }
     theme::set_accent(theme::system_accent());
     // Let connected iPhones/iPads appear as recordable devices.
     crate::capture::camera::enable_screen_capture_devices();

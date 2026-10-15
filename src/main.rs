@@ -17,6 +17,9 @@ use glide::render::{Gpu, Renderer, VideoFrame};
 struct Cli {
     #[command(subcommand)]
     cmd: Option<Cmd>,
+    /// Project to open (the desktop entry passes it as `%F`).
+    #[arg(value_name = "PROJECT")]
+    open: Vec<PathBuf>,
 }
 
 #[derive(Subcommand)]
@@ -117,15 +120,15 @@ enum Cmd {
         duration: Option<f64>,
         #[arg(long, default_value_t = 60)]
         fps: u32,
-        /// Folder for the project (default ~/Movies/Glide).
+        /// Folder for the project (default: the Glide folder in Videos).
         #[arg(long)]
         dir: Option<PathBuf>,
         #[arg(long)]
         name: Option<String>,
-        /// Leave Finder's desktop icons out of the recording.
+        /// Leave the desktop icons out of the recording (macOS only).
         #[arg(long)]
         hide_icons: bool,
-        /// Leave the Dock out of the recording.
+        /// Leave the Dock out of the recording (macOS only).
         #[arg(long)]
         hide_dock: bool,
     },
@@ -189,7 +192,7 @@ enum Cmd {
     /// Transcribe a project's microphone track into captions.
     Transcribe {
         project: PathBuf,
-        /// apple, whisper-base, whisper-small or whisper-medium.
+        /// whisper-base, whisper-small or whisper-medium (apple is macOS-only).
         #[arg(long, default_value = "whisper-base")]
         engine: String,
     },
@@ -241,6 +244,7 @@ enum Cmd {
 fn main() -> Result<()> {
     let cli = Cli::parse();
     // AppKit must be initialised for cursor and device queries.
+    #[cfg(target_os = "macos")]
     if let Some(mtm) = objc2::MainThreadMarker::new() {
         let _ = objc2_app_kit::NSApplication::sharedApplication(mtm);
     }
@@ -382,13 +386,15 @@ fn main() -> Result<()> {
         }
         Some(Cmd::Transcribe { project, engine }) => {
             let engine = glide::transcribe::Engine::parse(&engine).ok_or_else(|| anyhow::anyhow!("unknown engine {engine:?}"))?;
+            #[cfg(not(target_os = "macos"))]
+            anyhow::ensure!(!matches!(engine, glide::transcribe::Engine::Apple), "Apple's speech engine is macOS-only; use a whisper model");
             let t0 = Instant::now();
             let n = glide::transcribe::transcribe_package(&Package::new(&project), engine, &Default::default())?;
             eprintln!("{} in {:.1} s", engine.label(), t0.elapsed().as_secs_f64());
             println!("{n} words → {}", glide::transcribe::transcript_path(&Package::new(&project)).display());
             Ok(())
         }
-        None => glide::app::run(None),
+        None => glide::app::run(cli.open.into_iter().find(|p| p.extension().and_then(|e| e.to_str()) == Some(glide::project::EXTENSION))),
     }
 }
 
@@ -671,9 +677,18 @@ fn record(
         ..Default::default()
     };
     unsafe { libc::signal(libc::SIGINT, on_sigint as *const () as usize) };
-    let rec = Recorder::start(opts)?;
+    unsafe { libc::signal(libc::SIGTERM, on_sigint as *const () as usize) };
+    unsafe { libc::signal(libc::SIGHUP, on_sigint as *const () as usize) };
+    glide::recorder::install_pause_signals();
+    let mut rec = Recorder::start(opts)?;
     eprintln!("glide: recording to {} (Ctrl-C to stop)", rec.package.root.display());
     loop {
+        if glide::recorder::take_pause_request() {
+            rec.pause();
+        }
+        if glide::recorder::take_resume_request() {
+            rec.resume();
+        }
         std::thread::sleep(std::time::Duration::from_millis(50));
         if STOP.load(std::sync::atomic::Ordering::SeqCst) || rec.error().is_some() {
             break;

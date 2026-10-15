@@ -278,6 +278,13 @@ impl MovieWriter {
         Ok(())
     }
 
+    /// Append one tightly packed or strided BGRA frame from CPU memory.
+    pub fn push_bgra(&mut self, bgra: &[u8], width: u32, height: u32, stride: usize) -> Result<()> {
+        let pb = self.buffer()?;
+        fill_bgra(&pb, bgra, width, height, stride);
+        self.push_frame(&pb)
+    }
+
     pub fn finish(mut self) -> Result<()> {
         self.drain_audio()?;
         unsafe {

@@ -153,7 +153,7 @@ pub fn render(shot: &Shot, out_file: &Path) -> Result<()> {
                 ed.tick();
             }
         }
-        let out = ctx.run_ui(input, |ui| {
+        let mut out = ctx.run_ui(input, |ui| {
             match &mut editor {
                 Some(ed) => {
                     let mut chrome = home::Chrome { settings: &mut settings, devices: &mut devices, projects: &projects, thumbs: &mut thumbs, action: home::Action::None };
@@ -179,6 +179,7 @@ pub fn render(shot: &Shot, out_file: &Path) -> Result<()> {
                 renderer.update_texture(&gpu.device, &gpu.queue, *id, d);
             }
         }
+        out.textures_delta.clear();
         last = Some(out);
     }
     let out = last.unwrap();

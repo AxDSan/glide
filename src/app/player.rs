@@ -1,5 +1,5 @@
 //! Preview audio: the edit's soundtrack, mixed in the background and played
-//! through CoreAudio (cpal) in step with the playhead. The master volume is
+//! through cpal in step with the playhead. The master volume is
 //! applied live in the output callback; other edits (mutes, clip volumes,
 //! music, voice-overs) re-mix in the background and swap in while playing.
 //! The playhead is the clock: the audio is re-seeked if it drifts.
@@ -133,12 +133,80 @@ pub struct AudioPreview {
     pub error: Option<String>,
     /// When the output was last restarted (at most once a second).
     restarted: Option<Instant>,
-    /// Held while playing, so App Nap doesn't throttle the picture when
-    /// Glide isn't the frontmost app.
+    /// Held while playing (see `begin_activity`), so the display doesn't sleep
+    /// and the picture isn't throttled when Glide isn't the frontmost app.
     activity: Option<Activity>,
 }
 
+/// Held while playing: App Nap's activity token on macOS.
+#[cfg(target_os = "macos")]
 type Activity = SendBox<objc2::rc::Retained<objc2::runtime::ProtocolObject<dyn objc2_foundation::NSObjectProtocol>>>;
+
+/// Held while playing: a ScreenSaver inhibit cookie and the bus connection it
+/// came from (UnInhibit must be sent on that same connection).
+#[cfg(target_os = "linux")]
+struct Activity {
+    conn: zbus::blocking::Connection,
+    cookie: u32,
+}
+
+/// Keeps the machine awake while playing (macOS: App Nap activity). `None`
+/// when the platform refuses; playback continues without the hold.
+#[cfg(target_os = "macos")]
+fn begin_activity() -> Option<Activity> {
+    use objc2_foundation::{NSActivityOptions, NSProcessInfo, NSString};
+    let token = NSProcessInfo::processInfo().beginActivityWithOptions_reason(NSActivityOptions::UserInitiated, &NSString::from_str("playing a recording"));
+    Some(SendBox(token))
+}
+
+/// Ends a hold taken by `begin_activity`.
+#[cfg(target_os = "macos")]
+fn end_activity(t: Activity) {
+    // SAFETY: the token came from beginActivity and is ended once.
+    unsafe { objc2_foundation::NSProcessInfo::processInfo().endActivity(&t.0) };
+}
+
+/// Asks the session's ScreenSaver service (org.freedesktop.ScreenSaver) to
+/// inhibit idle sleep while playing. `None` when no service answers; the
+/// failure is logged once.
+#[cfg(target_os = "linux")]
+fn begin_activity() -> Option<Activity> {
+    static WARNED: AtomicBool = AtomicBool::new(false);
+    let inhibit = zbus::blocking::Connection::session().and_then(|conn| {
+        let reply = conn.call_method(
+            Some("org.freedesktop.ScreenSaver"),
+            "/org/freedesktop/ScreenSaver",
+            Some("org.freedesktop.ScreenSaver"),
+            "Inhibit",
+            &("Glide", "playing a recording"),
+        )?;
+        let cookie: u32 = reply.body().deserialize()?;
+        Ok(Activity { conn, cookie })
+    });
+    match inhibit {
+        Ok(a) => Some(a),
+        Err(e) => {
+            if !WARNED.swap(true, Ordering::Relaxed) {
+                eprintln!("glide: couldn't inhibit screen sleep: {e}");
+            }
+            None
+        }
+    }
+}
+
+/// Releases a ScreenSaver inhibit taken by `begin_activity`.
+#[cfg(target_os = "linux")]
+fn end_activity(t: Activity) {
+    if let Err(e) = t.conn.call_method(
+        Some("org.freedesktop.ScreenSaver"),
+        "/org/freedesktop/ScreenSaver",
+        Some("org.freedesktop.ScreenSaver"),
+        "UnInhibit",
+        &(t.cookie,),
+    ) {
+        eprintln!("glide: couldn't release screen sleep inhibit: {e}");
+    }
+}
 
 impl AudioPreview {
     pub fn new() -> Self {
@@ -239,9 +307,7 @@ impl AudioPreview {
             self.output = None;
         }
         if self.activity.is_none() {
-            use objc2_foundation::{NSActivityOptions, NSProcessInfo, NSString};
-            let token = NSProcessInfo::processInfo().beginActivityWithOptions_reason(NSActivityOptions::UserInitiated, &NSString::from_str("playing a recording"));
-            self.activity = Some(SendBox(token));
+            self.activity = begin_activity();
         }
         if let Some(o) = &mut self.output {
             o.beat = (u64::MAX, Instant::now());
@@ -256,11 +322,10 @@ impl AudioPreview {
     pub fn pause(&mut self) {
         self.shared.playing.store(false, Ordering::Relaxed);
         if let Some(t) = self.activity.take() {
-            // SAFETY: the token came from beginActivity and is ended once.
-            unsafe { objc2_foundation::NSProcessInfo::processInfo().endActivity(&t.0) };
+            end_activity(t);
         }
         if let Some(o) = &self.output {
-            // Stopping the device lets the Mac sleep; restarting is instant.
+            // Stopping the device lets the system sleep; restarting is instant.
             let _ = o.stream.0.pause();
         }
     }
