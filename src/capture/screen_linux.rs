@@ -24,8 +24,8 @@ use pw::spa::param::format_utils;
 use pw::spa::param::video::{VideoFormat, VideoInfoRaw};
 use pw::spa::param::ParamType;
 use pw::spa::pod::serialize::PodSerializer;
-use pw::spa::pod::{Pod, Value};
-use pw::spa::utils::{Direction, Fraction, Rectangle, SpaTypes};
+use pw::spa::pod::{ChoiceValue, Object, Pod, Property, PropertyFlags, Value};
+use pw::spa::utils::{Choice, ChoiceEnum, ChoiceFlags, Direction, Fraction, Id, Rectangle, SpaTypes};
 use pw::stream::{Stream, StreamFlags, StreamRc, StreamState};
 use std::collections::hash_map::DefaultHasher;
 use std::fs;
@@ -447,7 +447,7 @@ fn run_stream(
                 st.fail(format!("screen stream error: {e}"));
             }
         })
-        .param_changed(|_, st, id, param| {
+        .param_changed(|stream, st, id, param| {
             let Some(param) = param else { return };
             if id != ParamType::Format.as_raw() {
                 return;
@@ -461,7 +461,12 @@ fn run_stream(
             let mut info = VideoInfoRaw::new();
             match info.parse(param) {
                 Ok(_) => st.format = info,
-                Err(e) => st.fail(format!("parsing screen format: {e:?}")),
+                Err(e) => return st.fail(format!("parsing screen format: {e:?}")),
+            }
+            // Without these the compositor attaches no cursor or crop metadata to
+            // buffers, and in Metadata mode the cursor would then be lost entirely.
+            if let Err(e) = request_meta(stream) {
+                eprintln!("glide: {e:#}; recording without cursor metadata");
             }
         })
         .process(|stream, st| {
@@ -562,6 +567,50 @@ fn format_pod(fps: u32) -> Result<Vec<u8>> {
     Ok(bytes)
 }
 
+/// Size of a cursor meta whose bitmap is `w`x`h` BGRA.
+const fn cursor_meta_size(w: usize, h: usize) -> i32 {
+    (size_of::<pw::spa::sys::spa_meta_cursor>() + size_of::<pw::spa::sys::spa_meta_bitmap>() + w * h * 4) as i32
+}
+
+/// One SPA_PARAM_Meta pod asking for metadata of `kind` with `size` bytes.
+fn meta_pod(kind: u32, size: Value) -> Result<Vec<u8>> {
+    let prop = |key, value| Property { key, flags: PropertyFlags::empty(), value };
+    let obj = Object {
+        type_: SpaTypes::ObjectParamMeta.as_raw(),
+        id: ParamType::Meta.as_raw(),
+        properties: vec![
+            prop(pw::spa::sys::SPA_PARAM_META_type, Value::Id(Id(kind))),
+            prop(pw::spa::sys::SPA_PARAM_META_size, size),
+        ],
+    };
+    Ok(PodSerializer::serialize(Cursor::new(Vec::new()), &Value::Object(obj))
+        .map_err(|e| anyhow!("serializing meta pod: {e:?}"))?
+        .0
+        .into_inner())
+}
+
+/// Asks the compositor for cursor and video-crop metadata on every buffer.
+fn request_meta(stream: &Stream) -> Result<()> {
+    let cursor = Value::Choice(ChoiceValue::Int(Choice(
+        ChoiceFlags::empty(),
+        ChoiceEnum::Range {
+            default: cursor_meta_size(64, 64),
+            min: cursor_meta_size(1, 1),
+            max: cursor_meta_size(1024, 1024),
+        },
+    )));
+    let crop = Value::Int(size_of::<pw::spa::sys::spa_meta_region>() as i32);
+    let pods = [
+        meta_pod(pw::spa::sys::SPA_META_Cursor, cursor)?,
+        meta_pod(pw::spa::sys::SPA_META_VideoCrop, crop)?,
+    ];
+    let mut params: Vec<&Pod> = pods
+        .iter()
+        .map(|b| Pod::from_bytes(b).ok_or_else(|| anyhow!("invalid meta pod")))
+        .collect::<Result<_>>()?;
+    stream.update_params(&mut params).context("requesting cursor metadata")
+}
+
 /// Converts one PipeWire buffer into a BGRA frame and cursor state.
 fn on_frame(stream: &Stream, st: &mut Frames) -> Result<()> {
     let Some(mut buf) = stream.dequeue_buffer() else {
@@ -614,8 +663,9 @@ fn on_frame(stream: &Stream, st: &mut Frames) -> Result<()> {
     let mut cursor_pos = None;
     if let Some(c) = buf.find_meta::<MetaCursor>() {
         if c.is_valid() {
-            if c.id() != 0 {
-                st.cursor_bitmap = cursor_bitmap(c);
+            // The bitmap is attached only when the cursor image changes; keep the last one.
+            if let Some(b) = cursor_bitmap(c) {
+                st.cursor_bitmap = Some(b);
             }
             let p = c.position();
             cursor_pos = Some((p.x as f64, p.y as f64));
@@ -697,14 +747,23 @@ fn on_frame(stream: &Stream, st: &mut Frames) -> Result<()> {
     Ok(())
 }
 
-/// Copies a cursor bitmap (ARGB or BGRA in memory) into tightly packed BGRA.
-/// Returns None for other formats or invalid data.
+/// Copies a cursor bitmap (BGRA, RGBA, ARGB or ABGR in memory; KWin sends RGBA) into
+/// tightly packed BGRA. Returns None for other formats or invalid data.
 fn cursor_bitmap(c: &MetaCursor) -> Option<CursorBitmap> {
     let bm = c.bitmap()?;
     let fmt = bm.format();
-    if fmt != VideoFormat::BGRA && fmt != VideoFormat::ARGB {
+    // Byte offsets of B, G, R, A within one source pixel.
+    let order: [usize; 4] = if fmt == VideoFormat::BGRA {
+        [0, 1, 2, 3]
+    } else if fmt == VideoFormat::RGBA {
+        [2, 1, 0, 3]
+    } else if fmt == VideoFormat::ARGB {
+        [3, 2, 1, 0]
+    } else if fmt == VideoFormat::ABGR {
+        [1, 2, 3, 0]
+    } else {
         return None;
-    }
+    };
     let size = bm.size();
     let (w, h) = (size.width as usize, size.height as usize);
     let stride = bm.stride().unsigned_abs() as usize;
@@ -714,7 +773,9 @@ fn cursor_bitmap(c: &MetaCursor) -> Option<CursorBitmap> {
     }
     let mut bgra = Vec::with_capacity(w * h * 4);
     for row in data.chunks(stride).take(h) {
-        bgra.extend_from_slice(&row[..w * 4]);
+        for p in row[..w * 4].chunks_exact(4) {
+            bgra.extend(order.map(|i| p[i]));
+        }
     }
     let mut hasher = DefaultHasher::new();
     hasher.write(&bgra);

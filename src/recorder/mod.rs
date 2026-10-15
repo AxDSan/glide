@@ -116,11 +116,7 @@ impl CameraRec {
     fn start(sel: Option<&str>, path: &std::path::Path) -> Result<Self> {
         let spec = VideoSpec { width: 1280, height: 720, fps: 30, codec: CapCodec::H264, bitrate: 8_000_000, quality: None, pixel_format: PIX_BGRA };
         Self::start_spec(path, &spec, |shared| {
-            #[cfg(target_os = "macos")]
-            let cam = Camera::start_with(sel, shared, true)?;
-            #[cfg(not(target_os = "macos"))]
-            let cam = Camera::start(sel, shared)?;
-            Ok(cam)
+            Camera::start_with(sel, shared, true)
         })
     }
 

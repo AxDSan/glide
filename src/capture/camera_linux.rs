@@ -380,7 +380,7 @@ fn yuyv_to_bgra(src: &[u8], w: usize, h: usize, stride: usize) -> Vec<u8> {
     out
 }
 
-/// A live webcam feeding `Shared::push_cam` from its own thread.
+/// A live webcam feeding `Shared::push_cam` (or `push_screen`) from its own thread.
 pub struct Camera {
     pub name: String,
     stop: Arc<AtomicBool>,
@@ -390,6 +390,12 @@ pub struct Camera {
 impl Camera {
     /// `sel`: None = first camera; Some = exact device path, else case-insensitive name substring.
     pub fn start(sel: Option<&str>, shared: Arc<Shared>) -> Result<Camera> {
+        Self::start_with(sel, shared, false)
+    }
+
+    /// Like `start`; `as_screen` routes frames to the sink's main video, which a
+    /// camera-only recording needs: only screen frames start the sink's timeline.
+    pub fn start_with(sel: Option<&str>, shared: Arc<Shared>, as_screen: bool) -> Result<Camera> {
         let devices = cameras();
         let dev = match sel {
             None => devices.first().ok_or_else(|| anyhow!("no camera found"))?,
@@ -412,7 +418,7 @@ impl Camera {
         let stop = Arc::new(AtomicBool::new(false));
         let thread = {
             let stop = stop.clone();
-            std::thread::spawn(move || pump(stream, &shared, &stop))
+            std::thread::spawn(move || pump(stream, &shared, &stop, as_screen))
         };
         Ok(Camera {
             name,
@@ -422,9 +428,10 @@ impl Camera {
     }
 }
 
-fn pump(mut stream: Stream, shared: &Shared, stop: &AtomicBool) {
+fn pump(mut stream: Stream, shared: &Shared, stop: &AtomicBool, as_screen: bool) {
     while !stop.load(Ordering::Relaxed) && !shared.stopped() {
         match stream.frame() {
+            Ok(Some((pts, frame))) if as_screen => shared.push_screen(pts, frame),
             Ok(Some((pts, frame))) => shared.push_cam(pts, frame),
             Ok(None) => {}
             Err(e) => {
