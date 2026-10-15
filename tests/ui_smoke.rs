@@ -7,6 +7,7 @@ use std::time::Duration;
 
 use glide::app::editor::{Editor, Selection, Tab};
 use glide::app::home::{self, Devices, Settings, Thumbs};
+use glide::project::model::CursorSkin;
 use glide::render::Gpu;
 
 fn frame(ctx: &egui::Context, t: f64, f: impl FnMut(&mut egui::Ui)) {
@@ -58,6 +59,14 @@ fn editor_and_home_render_every_panel() {
             editor_frame(&mut ed, t);
         }
     }
+    // The cursor tab's theme grid, with a bundled theme in the preview.
+    ed.tab = Tab::Cursor;
+    ed.project.style.cursor.skin = CursorSkin::Guns;
+    for _ in 0..2 {
+        t += 0.016;
+        editor_frame(&mut ed, t);
+    }
+    assert_eq!(ed.cursor_thumbs.as_ref().map(Vec::len), Some(CursorSkin::THEMES.len()));
     // Selections show their own inspector panels.
     let zoom = ed.project.timeline.zooms.first().map(|z| z.id);
     let slice = ed.project.timeline.slices[0].id;

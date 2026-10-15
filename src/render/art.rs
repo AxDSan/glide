@@ -118,9 +118,21 @@ fn poly_sd(p: Vec2, pts: &[Vec2]) -> f64 {
     if inside { -d } else { d }
 }
 
-/// Paint shapes (signed distance fn in shape units) as a cursor: dark fill,
-/// white outline, soft drop shadow.
-fn paint(units: Vec2, px_per_unit: f64, outline: f64, sd: impl Fn(Vec2) -> f64) -> Image {
+/// Fill and outline colours of a drawn cursor, linear 0..1 RGB.
+#[derive(Clone, Copy)]
+pub struct Palette {
+    pub fill: [f64; 3],
+    pub ring: [f64; 3],
+}
+
+impl Palette {
+    /// Dark fill, white outline.
+    pub const DEFAULT: Palette = Palette { fill: [0.0; 3], ring: [1.0; 3] };
+}
+
+/// Paint shapes (signed distance fn in shape units) as a cursor: filled, outlined,
+/// with a soft drop shadow.
+fn paint(units: Vec2, px_per_unit: f64, outline: f64, pal: Palette, sd: impl Fn(Vec2) -> f64) -> Image {
     let pad = 4.0;
     let (w, h) = (((units.x + 2.0 * pad) * px_per_unit).ceil() as u32, ((units.y + 2.0 * pad) * px_per_unit).ceil() as u32);
     let mut rgba = Vec::with_capacity((w * h * 4) as usize);
@@ -133,15 +145,13 @@ fn paint(units: Vec2, px_per_unit: f64, outline: f64, sd: impl Fn(Vec2) -> f64) 
             let ring = ((outline - d) / aa + 0.5).clamp(0.0, 1.0);
             let ds = sd(p - v2(0.0, 0.9));
             let shadow = (-(ds - outline).max(0.0).powi(2) / 2.5).exp() * 0.35;
-            // Composite: shadow, white ring, black fill (premultiplied).
-            let mut a = shadow;
-            let mut c = 0.0;
-            c = c * (1.0 - ring) + ring;
-            a = a * (1.0 - ring) + ring;
-            c *= 1.0 - fill;
-            a = a * (1.0 - fill) + fill;
-            let v = (c * 255.0) as u8;
-            rgba.extend_from_slice(&[v, v, v, (a * 255.0) as u8]);
+            // Composite: black shadow, outline ring, fill (premultiplied).
+            let a = (shadow * (1.0 - ring) + ring) * (1.0 - fill) + fill;
+            for i in 0..3 {
+                let c = (pal.ring[i] * ring) * (1.0 - fill) + pal.fill[i] * fill;
+                rgba.push((c * 255.0).round() as u8);
+            }
+            rgba.push((a * 255.0) as u8);
         }
     }
     Image { width: w, height: h, rgba }
@@ -150,19 +160,51 @@ fn paint(units: Vec2, px_per_unit: f64, outline: f64, sd: impl Fn(Vec2) -> f64) 
 /// A vector cursor image, its hotspot (normalised) and height relative to
 /// the standard arrow.
 pub fn vector_cursor(kind: Option<&str>) -> (Image, Vec2, f64) {
+    vector_cursor_in(kind, Palette::DEFAULT)
+}
+
+/// Like [`vector_cursor`], in the given colours.
+pub fn vector_cursor_in(kind: Option<&str>, pal: Palette) -> (Image, Vec2, f64) {
     const PX: f64 = 6.0;
     let pad = 4.0;
+    // Hotspot at shape point `p` of a `units`-sized shape.
+    let hot = |p: Vec2, units: Vec2| v2((p.x + pad) / (units.x + 2.0 * pad), (p.y + pad) / (units.y + 2.0 * pad));
     match kind {
         Some("ibeam") => {
             let units = v2(9.0, 18.0);
-            let img = paint(units, PX, 1.2, |p| {
+            let img = paint(units, PX, 1.2, pal, |p| {
                 let bar = (p.x - 4.5).abs().max((p.y - 9.0).abs() - 8.0) - 0.7;
                 let top = (p.x - 4.5).abs().max((p.y - 0.6).abs()) - 2.6 + 2.0;
                 let bot = (p.x - 4.5).abs().max((p.y - 17.4).abs()) - 2.6 + 2.0;
                 bar.min(top.max((p.y - 0.6).abs() - 0.6)).min(bot.max((p.y - 17.4).abs() - 0.6))
             });
-            let hot = v2((4.5 + pad) / (units.x + 2.0 * pad), (9.0 + pad) / (units.y + 2.0 * pad));
-            (img, hot, 1.0)
+            (img, hot(v2(4.5, 9.0), units), 1.0)
+        }
+        Some("crosshair") => {
+            let units = v2(17.0, 17.0);
+            let c = v2(8.5, 8.5);
+            let arms = [(v2(0.0, -2.0), v2(0.0, -8.0)), (v2(0.0, 2.0), v2(0.0, 8.0)), (v2(-2.0, 0.0), v2(-8.0, 0.0)), (v2(2.0, 0.0), v2(8.0, 0.0))];
+            let img = paint(units, PX, 1.2, pal, |p| arms.iter().map(|&(a, b)| seg_dist(p, c + a, c + b) - 0.75).fold(f64::MAX, f64::min));
+            (img, hot(c, units), (units.y + 2.0 * pad) / 20.0)
+        }
+        Some(k @ ("resize-left-right" | "resize-up-down")) => {
+            let across = k == "resize-up-down";
+            // A horizontal double arrow; the vertical one is the same shape transposed.
+            let pts = [
+                v2(0.0, 4.5),
+                v2(5.0, 0.0),
+                v2(5.0, 3.0),
+                v2(16.0, 3.0),
+                v2(16.0, 0.0),
+                v2(21.0, 4.5),
+                v2(16.0, 9.0),
+                v2(16.0, 6.0),
+                v2(5.0, 6.0),
+                v2(5.0, 9.0),
+            ];
+            let units = if across { v2(9.0, 21.0) } else { v2(21.0, 9.0) };
+            let img = paint(units, PX, 1.3, pal, |p| poly_sd(if across { v2(p.y, p.x) } else { p }, &pts));
+            (img, hot(units * 0.5, units), (units.y + 2.0 * pad) / 20.0)
         }
         _ => {
             let pts = [
@@ -175,9 +217,8 @@ pub fn vector_cursor(kind: Option<&str>) -> (Image, Vec2, f64) {
                 v2(12.2, 12.0),
             ];
             let units = v2(13.0, 20.0);
-            let img = paint(units, PX, 1.3, |p| poly_sd(p, &pts));
-            let hot = v2(pad / (units.x + 2.0 * pad), pad / (units.y + 2.0 * pad));
-            (img, hot, (units.y + 2.0 * pad) / 20.0)
+            let img = paint(units, PX, 1.3, pal, |p| poly_sd(p, &pts));
+            (img, hot(v2(0.0, 0.0), units), (units.y + 2.0 * pad) / 20.0)
         }
     }
 }

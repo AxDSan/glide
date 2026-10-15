@@ -144,6 +144,68 @@ pub enum CursorSkin {
     Vector,
     /// A soft touch-style circle.
     Touch,
+    /// Bundled cursor themes (`assets/cursors/<name>`).
+    Macos,
+    Windows,
+    Flat,
+    Playful,
+    Pixel,
+    Guns,
+    Items,
+    Animals,
+    Chibi,
+    Cute,
+}
+
+impl CursorSkin {
+    /// The bundled themes, in picker order.
+    pub const THEMES: [CursorSkin; 10] = [
+        CursorSkin::Macos,
+        CursorSkin::Windows,
+        CursorSkin::Flat,
+        CursorSkin::Playful,
+        CursorSkin::Pixel,
+        CursorSkin::Guns,
+        CursorSkin::Items,
+        CursorSkin::Animals,
+        CursorSkin::Chibi,
+        CursorSkin::Cute,
+    ];
+
+    /// Asset folder of a bundled theme, None for the built-in skins.
+    pub fn theme(self) -> Option<&'static str> {
+        Some(match self {
+            CursorSkin::System | CursorSkin::Vector | CursorSkin::Touch => return None,
+            CursorSkin::Macos => "macos",
+            CursorSkin::Windows => "windows",
+            CursorSkin::Flat => "flat",
+            CursorSkin::Playful => "playful",
+            CursorSkin::Pixel => "pixel",
+            CursorSkin::Guns => "guns",
+            CursorSkin::Items => "items",
+            CursorSkin::Animals => "animals",
+            CursorSkin::Chibi => "chibi",
+            CursorSkin::Cute => "cute",
+        })
+    }
+
+    pub fn label(self) -> &'static str {
+        match self {
+            CursorSkin::System => "System",
+            CursorSkin::Vector => "Vector",
+            CursorSkin::Touch => "Touch",
+            CursorSkin::Macos => "macOS",
+            CursorSkin::Windows => "Windows",
+            CursorSkin::Flat => "Minimal",
+            CursorSkin::Playful => "Playful",
+            CursorSkin::Pixel => "Retro Pixel",
+            CursorSkin::Guns => "Game Guns",
+            CursorSkin::Items => "Game Items",
+            CursorSkin::Animals => "Animals",
+            CursorSkin::Chibi => "Chibi",
+            CursorSkin::Cute => "Cute",
+        }
+    }
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Serialize, Deserialize)]

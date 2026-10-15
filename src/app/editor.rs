@@ -128,6 +128,8 @@ pub struct Editor {
     pub px_per_sec: f32,
     pub status: Option<String>,
     pub thumbs: Option<Vec<egui::TextureHandle>>,
+    /// Arrow previews of the bundled cursor themes, in `CursorSkin::THEMES` order.
+    pub cursor_thumbs: Option<Vec<egui::TextureHandle>>,
     pub close_requested: bool,
     /// Background transcription (word count or error).
     pub transcribing: Option<std::thread::JoinHandle<Result<usize, String>>>,
@@ -200,6 +202,7 @@ impl Editor {
             px_per_sec: 80.0,
             status: None,
             thumbs: None,
+            cursor_thumbs: None,
             close_requested: false,
             transcribing: None,
             caption_engine: crate::transcribe::Engine::Whisper(crate::whisper::best_downloaded().unwrap_or(crate::whisper::Model::Base)),

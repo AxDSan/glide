@@ -1,0 +1,302 @@
+{
+  "animals": {
+    "arrow": {
+      "hotspot": [
+        0.0712,
+        0.0245
+      ],
+      "scale": 1.4
+    },
+    "closed-hand": {
+      "hotspot": [
+        0.5,
+        0.4989
+      ],
+      "scale": 1.4
+    },
+    "open-hand": {
+      "hotspot": [
+        0.4993,
+        0.5
+      ],
+      "scale": 1.4
+    },
+    "pointing-hand": {
+      "hotspot": [
+        0.6007,
+        0.0212
+      ],
+      "scale": 1.4
+    }
+  },
+  "chibi": {
+    "arrow": {
+      "hotspot": [
+        0.0323,
+        0.0305
+      ],
+      "scale": 1.4
+    },
+    "closed-hand": {
+      "hotspot": [
+        0.5,
+        0.4988
+      ],
+      "scale": 1.4
+    },
+    "open-hand": {
+      "hotspot": [
+        0.4987,
+        0.5
+      ],
+      "scale": 1.4
+    },
+    "pointing-hand": {
+      "hotspot": [
+        0.6296,
+        0.0212
+      ],
+      "scale": 1.4
+    }
+  },
+  "cute": {
+    "arrow": {
+      "hotspot": [
+        0.0269,
+        0.0212
+      ],
+      "scale": 1.4
+    },
+    "closed-hand": {
+      "hotspot": [
+        0.5,
+        0.501
+      ],
+      "scale": 1.4
+    },
+    "open-hand": {
+      "hotspot": [
+        0.5011,
+        0.5
+      ],
+      "scale": 1.4
+    },
+    "pointing-hand": {
+      "hotspot": [
+        0.7186,
+        0.0212
+      ],
+      "scale": 1.4
+    }
+  },
+  "flat": {
+    "arrow": {
+      "hotspot": [
+        0.0238,
+        0.0212
+      ],
+      "scale": 1.0
+    },
+    "closed-hand": {
+      "hotspot": [
+        0.4999,
+        0.5
+      ],
+      "scale": 1.0
+    },
+    "open-hand": {
+      "hotspot": [
+        0.5006,
+        0.5
+      ],
+      "scale": 1.0
+    },
+    "pointing-hand": {
+      "hotspot": [
+        0.6641,
+        0.0212
+      ],
+      "scale": 1.0
+    }
+  },
+  "guns": {
+    "arrow": {
+      "hotspot": [
+        0.0685,
+        0.0483
+      ],
+      "scale": 1.4
+    },
+    "closed-hand": {
+      "hotspot": [
+        0.5,
+        0.5
+      ],
+      "scale": 1.4
+    },
+    "open-hand": {
+      "hotspot": [
+        0.5006,
+        0.5
+      ],
+      "scale": 1.4
+    },
+    "pointing-hand": {
+      "hotspot": [
+        0.5367,
+        0.0212
+      ],
+      "scale": 1.4
+    }
+  },
+  "items": {
+    "arrow": {
+      "hotspot": [
+        0.022,
+        0.0218
+      ],
+      "scale": 1.4
+    },
+    "closed-hand": {
+      "hotspot": [
+        0.5,
+        0.5009
+      ],
+      "scale": 1.4
+    },
+    "open-hand": {
+      "hotspot": [
+        0.501,
+        0.5
+      ],
+      "scale": 1.4
+    },
+    "pointing-hand": {
+      "hotspot": [
+        0.5018,
+        0.0212
+      ],
+      "scale": 1.4
+    }
+  },
+  "macos": {
+    "arrow": {
+      "hotspot": [
+        0.0245,
+        0.0218
+      ],
+      "scale": 1.0
+    },
+    "closed-hand": {
+      "hotspot": [
+        0.4998,
+        0.5
+      ],
+      "scale": 1.0
+    },
+    "open-hand": {
+      "hotspot": [
+        0.5012,
+        0.5
+      ],
+      "scale": 1.0
+    },
+    "pointing-hand": {
+      "hotspot": [
+        0.3571,
+        0.0212
+      ],
+      "scale": 1.0
+    }
+  },
+  "pixel": {
+    "arrow": {
+      "hotspot": [
+        0.0261,
+        0.0219
+      ],
+      "scale": 1.1
+    },
+    "closed-hand": {
+      "hotspot": [
+        0.4986,
+        0.5
+      ],
+      "scale": 1.1
+    },
+    "open-hand": {
+      "hotspot": [
+        0.5003,
+        0.5
+      ],
+      "scale": 1.1
+    },
+    "pointing-hand": {
+      "hotspot": [
+        0.2727,
+        0.0212
+      ],
+      "scale": 1.1
+    }
+  },
+  "playful": {
+    "arrow": {
+      "hotspot": [
+        0.0246,
+        0.0212
+      ],
+      "scale": 1.1
+    },
+    "closed-hand": {
+      "hotspot": [
+        0.4994,
+        0.5
+      ],
+      "scale": 1.1
+    },
+    "open-hand": {
+      "hotspot": [
+        0.4987,
+        0.5
+      ],
+      "scale": 1.1
+    },
+    "pointing-hand": {
+      "hotspot": [
+        0.3631,
+        0.0212
+      ],
+      "scale": 1.1
+    }
+  },
+  "windows": {
+    "arrow": {
+      "hotspot": [
+        0.025,
+        0.0218
+      ],
+      "scale": 1.0
+    },
+    "closed-hand": {
+      "hotspot": [
+        0.4999,
+        0.5
+      ],
+      "scale": 1.0
+    },
+    "open-hand": {
+      "hotspot": [
+        0.5013,
+        0.5
+      ],
+      "scale": 1.0
+    },
+    "pointing-hand": {
+      "hotspot": [
+        0.4529,
+        0.0212
+      ],
+      "scale": 1.0
+    }
+  }
+}

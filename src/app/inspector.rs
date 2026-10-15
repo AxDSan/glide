@@ -31,7 +31,7 @@ pub fn ui(ui: &mut Ui, ed: &mut Editor) {
                 tabs(ui, &mut ed.tab);
                 match ed.tab {
                     Tab::Background => background(ui, ed, &mut draft),
-                    Tab::Cursor => cursor(ui, &mut draft, ed.rec.mouse.is_empty()),
+                    Tab::Cursor => cursor(ui, ed, &mut draft),
                     Tab::Camera => camera(ui, &mut draft, ed.rec.meta.camera.is_some()),
                     Tab::Captions => captions(ui, ed, &mut draft),
                     Tab::Audio => audio(ui, ed, &mut draft),
@@ -275,17 +275,68 @@ fn spring_picker(ui: &mut Ui, label: &str, cfg: &mut Option<SpringConfig>, prese
     }
 }
 
-fn cursor(ui: &mut Ui, d: &mut Project, no_data: bool) {
+fn cursor(ui: &mut Ui, ed: &mut Editor, d: &mut Project) {
     let c = &mut d.style.cursor;
-    if no_data {
+    if ed.rec.mouse.is_empty() {
         caption(ui, "This recording has no cursor data.");
     }
     section(ui, "Cursor", |ui| {
         toggle_row(ui, "Hide cursor", &mut c.hide);
         slider(ui, "Size", &mut c.size, 0.5..=4.0, "×");
+        #[derive(Clone, Copy, PartialEq)]
+        enum K {
+            Touch,
+            Vector,
+            System,
+            Theme,
+        }
+        let mut k = match c.skin {
+            CursorSkin::Touch => K::Touch,
+            CursorSkin::Vector => K::Vector,
+            CursorSkin::System => K::System,
+            _ => K::Theme,
+        };
         row(ui, "Style", |ui| {
-            segmented(ui, &mut c.skin, &[(CursorSkin::Touch, "Touch"), (CursorSkin::Vector, "Vector"), (CursorSkin::System, "System")]);
+            if segmented(ui, &mut k, &[(K::Touch, "Touch"), (K::Vector, "Vector"), (K::System, "System"), (K::Theme, "Themes")]) {
+                c.skin = match k {
+                    K::Touch => CursorSkin::Touch,
+                    K::Vector => CursorSkin::Vector,
+                    K::System => CursorSkin::System,
+                    K::Theme => CursorSkin::THEMES[0],
+                };
+            }
         });
+        if c.skin.theme().is_some() {
+            ui.add_space(6.0);
+            let thumbs = ed.cursor_thumbs.get_or_insert_with(|| {
+                CursorSkin::THEMES
+                    .iter()
+                    .map(|&s| {
+                        let (img, _, _) = crate::render::cursor_themes::cursor(s, Some("arrow")).expect("bundled theme");
+                        let ci = egui::ColorImage::from_rgba_premultiplied([img.width as usize, img.height as usize], &img.rgba);
+                        ui.ctx().load_texture(format!("cursor-theme-{}", s.label()), ci, egui::TextureOptions::LINEAR)
+                    })
+                    .collect()
+            });
+            // A dark tile, so light and dark cursors both read.
+            let tile = Color32::from_rgb(30, 27, 46);
+            ui.horizontal_wrapped(|ui| {
+                ui.spacing_mut().item_spacing = vec2(6.0, 6.0);
+                for (tex, &skin) in thumbs.iter().zip(CursorSkin::THEMES.iter()) {
+                    let [tw, th] = tex.size();
+                    let clicked = swatch(ui, vec2(52.0, 52.0), c.skin == skin, |p, r| {
+                        p.rect_filled(r, CornerRadius::same(6), tile);
+                        let k = (r.height() - 14.0) / tw.max(th) as f32;
+                        let ir = egui::Rect::from_center_size(r.center(), vec2(tw as f32 * k, th as f32 * k));
+                        p.image(tex.id(), ir, egui::Rect::from_min_max(egui::pos2(0.0, 0.0), egui::pos2(1.0, 1.0)), Color32::WHITE);
+                    });
+                    if clicked {
+                        c.skin = skin;
+                    }
+                }
+            });
+            caption(ui, c.skin.label());
+        }
     });
     section(ui, "Movement", |ui| {
         spring_picker(

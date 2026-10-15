@@ -4,6 +4,7 @@
 
 pub mod art;
 pub mod bgcheck;
+pub mod cursor_themes;
 pub mod gpu;
 pub mod icon;
 #[cfg(target_os = "macos")]
@@ -409,11 +410,8 @@ impl Renderer {
                 self.textures.remove(&TexId::Background);
             }
         }
-        let skin_key = match style.cursor.skin {
-            CursorSkin::System => 0,
-            CursorSkin::Vector => 1,
-            CursorSkin::Touch => 2,
-        };
+        // Any distinct number per skin, so switching skins rebuilds the cursor textures.
+        let skin_key = style.cursor.skin as u32;
         if self.cursor_art.get(&u32::MAX).map(|v| v.1) != Some(skin_key as f64) {
             self.cursor_art.clear();
             for k in self.textures.keys().copied().collect::<Vec<_>>() {
@@ -437,6 +435,7 @@ impl Renderer {
                     }
                     CursorSkin::Vector => art::vector_cursor(c.system.as_deref()),
                     CursorSkin::Touch => art::touch_cursor(),
+                    skin => cursor_themes::cursor(skin, c.system.as_deref()).expect("bundled theme"),
                 };
                 self.upload(TexId::Cursor(c.id), &img, true);
                 self.cursor_art.insert(c.id, (hotspot, scale));
@@ -444,6 +443,7 @@ impl Renderer {
             if rec.cursors.is_empty() {
                 let (img, hotspot, scale) = match style.cursor.skin {
                     CursorSkin::Touch => art::touch_cursor(),
+                    skin if skin.theme().is_some() => cursor_themes::cursor(skin, Some("arrow")).expect("bundled theme"),
                     _ => art::vector_cursor(Some("arrow")),
                 };
                 self.upload(TexId::Cursor(0), &img, true);
